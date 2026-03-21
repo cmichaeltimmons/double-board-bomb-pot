@@ -15,22 +15,29 @@ from PokerRL.game._.rl_env.game_rules import HoldemRules
 class CppHandeval(CppWrapper):
 
     def __init__(self):
-        super().__init__(path_to_dll=ospj(os.path.dirname(os.path.realpath(__file__)),
-                                          "lib_hand_eval." + self.CPP_LIB_FILE_ENDING))
-        self._clib.get_hand_rank_52_holdem.argtypes = [
-            self.ARR_2D_ARG_TYPE,
-            self.ARR_2D_ARG_TYPE
-        ]
-        self._clib.get_hand_rank_52_holdem.restype = ctypes.c_int32
+        try:
+            super().__init__(path_to_dll=ospj(os.path.dirname(os.path.realpath(__file__)),
+                                              "lib_hand_eval." + self.CPP_LIB_FILE_ENDING))
+            self._clib.get_hand_rank_52_holdem.argtypes = [
+                self.ARR_2D_ARG_TYPE,
+                self.ARR_2D_ARG_TYPE
+            ]
+            self._clib.get_hand_rank_52_holdem.restype = ctypes.c_int32
 
-        self._clib.get_hand_rank_all_hands_on_given_boards_52_holdem.argtypes = [
-            self.ARR_2D_ARG_TYPE,
-            self.ARR_2D_ARG_TYPE,
-            ctypes.c_int32,
-            self.ARR_2D_ARG_TYPE,
-            self.ARR_2D_ARG_TYPE
-        ]
-        self._clib.get_hand_rank_all_hands_on_given_boards_52_holdem.restype = None
+            self._clib.get_hand_rank_all_hands_on_given_boards_52_holdem.argtypes = [
+                self.ARR_2D_ARG_TYPE,
+                self.ARR_2D_ARG_TYPE,
+                ctypes.c_int32,
+                self.ARR_2D_ARG_TYPE,
+                self.ARR_2D_ARG_TYPE
+            ]
+            self._clib.get_hand_rank_all_hands_on_given_boards_52_holdem.restype = None
+            self._use_python_fallback = False
+        except OSError:
+            print("C hand evaluator not available, using pure Python (treys) fallback.")
+            from PokerRL.game._.cpp_wrappers.PythonHandeval import PythonHandeval
+            self._python_eval = PythonHandeval()
+            self._use_python_fallback = True
 
     def get_hand_rank_52_holdem(self, hand_2d, board_2d):
         """
@@ -41,6 +48,8 @@ class CppHandeval(CppWrapper):
         Returns:
             int: integer representing strength of the strongest 5card hand in the 7 cards. higher is better.
         """
+        if self._use_python_fallback:
+            return self._python_eval.get_hand_rank_52_holdem(hand_2d, board_2d)
         return self._clib.get_hand_rank_52_holdem(self.np_2d_arr_to_c(hand_2d), self.np_2d_arr_to_c(board_2d))
 
     def get_hand_rank_52_plo(self, hand_2d, board_2d):
@@ -65,6 +74,8 @@ class CppHandeval(CppWrapper):
         for n, i in enumerate(idxs_combs):
             hand_2c_combs[n, 0] = hand_2d[i[0]]
             hand_2c_combs[n, 1] = hand_2d[i[1]]
+        if self._use_python_fallback:
+            return self._python_eval.get_hand_rank_52_plo(hand_2d, board_2d)
         maxres = -1
         for hand in hand_2c_combs:
             res = self._clib.get_hand_rank_52_holdem(self.np_2d_arr_to_c(hand), self.np_2d_arr_to_c(board_2d))
@@ -82,6 +93,8 @@ class CppHandeval(CppWrapper):
                                                                 blocked on each of the given boards
 
         """
+        if self._use_python_fallback:
+            return self._python_eval.get_hand_rank_all_hands_on_given_boards_52_holdem(boards_1d, lut_holder)
         assert len(boards_1d.shape) == 2
         assert boards_1d.shape[1] == 5
         hand_ranks = np.full(shape=(boards_1d.shape[0], HoldemRules.RANGE_SIZE), fill_value=-1, dtype=np.int32)

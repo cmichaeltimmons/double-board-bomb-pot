@@ -25,6 +25,8 @@ class PokerPlayer:
         # player vars
         self.hand = None  # np.ndarray
         self.hand_rank = None
+        self.hand_rank_board1 = None
+        self.hand_rank_board2 = None
         self.current_bet = None
         self.stack = None
         self.starting_stack_this_episode = None
@@ -57,6 +59,8 @@ class PokerPlayer:
         # episode info
         self.stack = self.starting_stack_this_episode
         self.hand = []  # [[rank, suit], ...]
+        self.hand_rank_board1 = -1
+        self.hand_rank_board2 = -1
         self.current_bet = 0
 
         # flags for table management

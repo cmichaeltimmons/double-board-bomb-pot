@@ -3,7 +3,10 @@
 
 from os.path import join as ospj
 
-from pycrayon import CrayonClient
+try:
+    from pycrayon import CrayonClient
+except ImportError:
+    CrayonClient = None
 
 from PokerRL.rl.MaybeRay import MaybeRay
 from PokerRL.util.file_util import create_dir_if_not_exist, write_dict_to_file_json
@@ -22,7 +25,13 @@ class CrayonWrapper:
             create_dir_if_not_exist(path_log_storage)
 
         self._chief_handle = chief_handle
-        self._crayon = CrayonClient(hostname=crayon_server_address)
+        if CrayonClient is not None:
+            try:
+                self._crayon = CrayonClient(hostname=crayon_server_address)
+            except Exception:
+                self._crayon = None
+        else:
+            self._crayon = None
         self._experiments = {}
         self.clear()
         self._custom_logs = {}  # dict of exps containing dict of graph names containing lists of {step: val, } dicts
@@ -61,6 +70,8 @@ class CrayonWrapper:
         Pulls newly added logs from the chief onto whatever worker CrayonWrapper runs on. It then adds all these new
         logs to Tensorboard (i.e. PyCrayon's docker container)
         """
+        if self._crayon is None:
+            return
         new_v, exp_names = self._get_new_vals()
 
         for e in exp_names:

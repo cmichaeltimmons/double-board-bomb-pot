@@ -8,7 +8,9 @@ A collection of Poker games often used in computational poker research.
 from PokerRL.game.Poker import Poker
 from PokerRL.game._.rl_env.game_rules import HoldemRules, LeducRules, FlopHoldemRules, BigLeducRules
 from PokerRL.game._.rl_env.game_rules_plo import PLORules
+from PokerRL.game._.rl_env.game_rules_double_board_bomb_pot import DoubleBoardBombPotPLORules
 from PokerRL.game._.rl_env.poker_types.DiscretizedPokerEnv import DiscretizedPokerEnv
+from PokerRL.game._.rl_env.poker_types.DoubleBoardBombPotEnv import DoubleBoardBombPotEnv
 from PokerRL.game._.rl_env.poker_types.LimitPokerEnv import LimitPokerEnv
 from PokerRL.game._.rl_env.poker_types.NoLimitPokerEnv import NoLimitPokerEnv
 
@@ -285,6 +287,36 @@ class PLO(PLORules, DiscretizedPokerEnv):
                                      hh_logger=None)
 
 
+# """""""""""""""
+# Double Board Bomb Pot PLO
+# """""""""""""""
+class DoubleBoardBombPotPLO(DoubleBoardBombPotPLORules, DoubleBoardBombPotEnv):
+    """
+    Double Board Bomb Pot PLO: 6-max, all players post ante, no preflop betting,
+    two independent boards, pot splits 50/50 between board winners.
+    """
+
+    RULES = DoubleBoardBombPotPLORules
+    IS_FIXED_LIMIT_GAME = False
+    IS_POT_LIMIT_GAME = True
+
+    SMALL_BLIND = 0
+    BIG_BLIND = 0
+    ANTE = 300  # 3bb equivalent
+    DEFAULT_STACK_SIZE = 10000
+
+    EV_NORMALIZER = 1000.0 / ANTE  # Milli Antes
+    WIN_METRIC = Poker.MeasureAnte
+
+    def __init__(self, env_args, lut_holder, is_evaluating):
+        DoubleBoardBombPotPLORules.__init__(self)
+        DoubleBoardBombPotEnv.__init__(self,
+                                       env_args=env_args,
+                                       lut_holder=lut_holder,
+                                       is_evaluating=is_evaluating,
+                                       hh_logger=None)
+
+
 """
 register all new envs here!
 """
@@ -298,4 +330,5 @@ ALL_ENVS = [
     DiscretizedNLHoldem,
     Flop5Holdem,
     PLO,
+    DoubleBoardBombPotPLO,
 ]

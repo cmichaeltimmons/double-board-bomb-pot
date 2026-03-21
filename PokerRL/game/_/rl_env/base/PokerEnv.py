@@ -5,7 +5,10 @@ import copy
 import time
 
 import numpy as np
-from gym import spaces
+try:
+    from gym import spaces
+except ImportError:
+    from gymnasium import spaces
 
 from PokerRL.game.Poker import Poker
 from PokerRL.game.PokerEnvStateDictEnums import EnvDictIdxs, PlayerDictIdxs
@@ -266,7 +269,16 @@ class PokerEnv:
             # __________________________  Return Complete _Observation Space  __________________________
             # Tuple (lots of spaces.Discrete and spaces.Box)
             _observation_space = spaces.Tuple(_table_space + _player_space + _board_space)
-            _observation_space.shape = [len(_observation_space.spaces)]
+            try:
+                _observation_space.shape = [len(_observation_space.spaces)]
+            except (AttributeError, TypeError):
+                # gymnasium's Tuple doesn't allow setting .shape — wrap it
+                class _ObsSpaceWrapper:
+                    def __init__(self, space):
+                        self._space = space
+                        self.shape = [len(space.spaces)]
+                        self.spaces = space.spaces
+                _observation_space = _ObsSpaceWrapper(_observation_space)
 
         else:
             # __________________________  Public Information About Game State  _________________________
@@ -335,7 +347,16 @@ class PokerEnv:
             # __________________________  Return Complete _Observation Space  __________________________
             # Tuple (lots of spaces.Discrete and spaces.Box)
             _observation_space = spaces.Tuple(_table_space + _player_space + _board_space)
-            _observation_space.shape = [len(_observation_space.spaces)]
+            try:
+                _observation_space.shape = [len(_observation_space.spaces)]
+            except (AttributeError, TypeError):
+                # gymnasium's Tuple doesn't allow setting .shape — wrap it
+                class _ObsSpaceWrapper:
+                    def __init__(self, space):
+                        self._space = space
+                        self.shape = [len(space.spaces)]
+                        self.spaces = space.spaces
+                _observation_space = _ObsSpaceWrapper(_observation_space)
         return _observation_space, obs_idx_dict, obs_parts_idxs_dict
 
     def _init_from_args(self, env_args, is_evaluating):
@@ -868,7 +889,7 @@ class PokerEnv:
         elif len(all_non_all_in_and_non_fold_p) > 1:
 
             # payout if final round
-            if self.current_round == len(self.ALL_ROUNDS_LIST) - 1:
+            if self.current_round == self.ALL_ROUNDS_LIST[-1]:
                 is_terminal = True
                 self._put_current_bets_into_main_pot_and_side_pots()
                 if self.RETURN_PRE_TRANSITION_STATE_IN_INFO:
