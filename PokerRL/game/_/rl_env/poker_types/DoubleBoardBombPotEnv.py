@@ -14,7 +14,18 @@ class DoubleBoardBombPotEnv(DiscretizedPokerEnv):
     Board layout in self.board (shape (10, 2)):
         indices 0-4: board 1 (flop[0:3], turn[3], river[4])
         indices 5-9: board 2 (flop[5:8], turn[8], river[9])
+
+    If FIXED_FLOP_BOARD1 and FIXED_FLOP_BOARD2 are set (as lists of [rank, suit] pairs),
+    the flops are held constant every hand. Turn and river are still random.
+    This dramatically speeds up training for a specific board texture.
+
+    Card encoding: rank 0-12 (2-A), suit 0-3 (h,d,s,c)
+    Example: K♠=[11,2], 7♥=[5,0], 2♦=[0,1], Q♥=[10,0], J♠=[9,2], 9♣=[7,3]
     """
+
+    # Set these in the game class to fix the flop. None = random flops.
+    FIXED_FLOP_BOARD1 = None
+    FIXED_FLOP_BOARD2 = None
 
     def __init__(self, env_args, lut_holder, is_evaluating, hh_logger=None):
         super().__init__(env_args=env_args, lut_holder=lut_holder,
@@ -23,8 +34,13 @@ class DoubleBoardBombPotEnv(DiscretizedPokerEnv):
     # _______________________________ Board Dealing _______________________________
 
     def _deal_flop(self):
-        self.board[:3] = self.deck.draw(3)       # board 1 flop
-        self.board[5:8] = self.deck.draw(3)      # board 2 flop
+        if self.FIXED_FLOP_BOARD1 is not None and self.FIXED_FLOP_BOARD2 is not None:
+            # Fixed flop: just place the cards (already removed from deck in reset)
+            self.board[:3] = np.array(self.FIXED_FLOP_BOARD1, dtype=np.int8)
+            self.board[5:8] = np.array(self.FIXED_FLOP_BOARD2, dtype=np.int8)
+        else:
+            self.board[:3] = self.deck.draw(3)       # board 1 flop
+            self.board[5:8] = self.deck.draw(3)      # board 2 flop
 
     def _deal_turn(self):
         self.board[3:4] = self.deck.draw(1)      # board 1 turn
@@ -78,6 +94,11 @@ class DoubleBoardBombPotEnv(DiscretizedPokerEnv):
         # reset deck
         self.deck.reset()
 
+        # If using fixed flops, remove those cards from deck before dealing hole cards
+        if self.FIXED_FLOP_BOARD1 is not None and self.FIXED_FLOP_BOARD2 is not None:
+            fixed_cards = np.array(self.FIXED_FLOP_BOARD1 + self.FIXED_FLOP_BOARD2, dtype=np.int8)
+            self.deck.remove_cards(fixed_cards)
+
         # start hand in logger if presented
         if self._hh_logger is not None:
             players = []
@@ -89,7 +110,7 @@ class DoubleBoardBombPotEnv(DiscretizedPokerEnv):
         self._post_antes()
         self._put_current_bets_into_main_pot_and_side_pots()
 
-        # deal hole cards and flop to both boards
+        # deal hole cards (fixed flop cards already removed from deck)
         self._deal_hole_cards()
         self._deal_flop()
 

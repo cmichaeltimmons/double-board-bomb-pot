@@ -305,6 +305,11 @@ class DoubleBoardBombPotPLO(DoubleBoardBombPotPLORules, DoubleBoardBombPotEnv):
     ANTE = 300  # 3bb equivalent
     DEFAULT_STACK_SIZE = 10000
 
+    # Fixed flop: Board 1 = Ks 7h 2d, Board 2 = Qh Js 9c
+    # Card encoding: rank 0-12 (2=0, 3=1, ..., K=11, A=12), suit 0-3 (h=0, d=1, s=2, c=3)
+    FIXED_FLOP_BOARD1 = [[11, 2], [5, 0], [0, 1]]   # Ks 7h 2d
+    FIXED_FLOP_BOARD2 = [[10, 0], [9, 2], [7, 3]]    # Qh Js 9c
+
     EV_NORMALIZER = 1000.0 / ANTE  # Milli Antes
     WIN_METRIC = Poker.MeasureAnte
 
