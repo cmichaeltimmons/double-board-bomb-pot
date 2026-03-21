@@ -78,7 +78,7 @@ class IterationStrategy:
                 best_legal_deterministic = torch.zeros((bs, self._env_bldr.N_ACTIONS,), dtype=torch.float32,
                                                        device=self._device)
                 bests = torch.argmax(
-                    torch.where(legal_action_masks.byte(), advantages, torch.full_like(advantages, fill_value=-10e20))
+                    torch.where(legal_action_masks.bool(), advantages, torch.full_like(advantages, fill_value=-10e20))
                     , dim=1
                 )
                 _batch_arranged = torch.arange(bs, device=self._device, dtype=torch.long)
@@ -178,7 +178,7 @@ class IterationStrategy:
                 best_legal_deterministic = torch.zeros((n_hands, self._env_bldr.N_ACTIONS,), dtype=torch.float32,
                                                        device=self._device)
                 bests = torch.argmax(
-                    torch.where(legal_action_masks.byte(), advantages, torch.full_like(advantages, fill_value=-10e20)),
+                    torch.where(legal_action_masks.bool(), advantages, torch.full_like(advantages, fill_value=-10e20)),
                     dim=1
                 )
 
