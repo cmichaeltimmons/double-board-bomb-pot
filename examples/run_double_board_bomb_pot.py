@@ -23,7 +23,7 @@ if __name__ == '__main__':
                       CLUSTER=False,
                       n_learner_actor_workers=1,
 
-                      max_buffer_size_adv=1500000,
+                      max_buffer_size_adv=3000000,
                       export_each_net=False,
                       checkpoint_freq=20,
                       eval_agent_export_freq=5,
@@ -40,7 +40,11 @@ if __name__ == '__main__':
                       lr_adv=0.004,
 
                       mini_batch_size_adv=5000,
-                      init_adv_model="last",
+                      init_adv_model="random",
+
+                      device_inference="cpu",
+                      device_training="cuda",
+                      device_parameter_server="cpu",
 
                       game_cls=DoubleBoardBombPotPLO,
                       env_bldr_cls=VanillaEnvBuilder,
@@ -64,6 +68,6 @@ if __name__ == '__main__':
                                        ),
                   ),
                   eval_methods={},
-                  n_iterations=64)
+                  n_iterations=500)
 
     ctrl.run()
