@@ -68,6 +68,8 @@ if __name__ == '__main__':
                                        ),
                   ),
                   eval_methods={},
-                  n_iterations=500)
+                  n_iterations=500,
+                  iteration_to_import=60,
+                  name_to_import="DBBP_PLO_HU_fixed_flop")
 
     ctrl.run()
