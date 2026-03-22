@@ -40,7 +40,7 @@ if __name__ == '__main__':
                       lr_adv=0.004,
 
                       mini_batch_size_adv=5000,
-                      init_adv_model="random",
+                      init_adv_model="last",
 
                       device_inference="cpu",
                       device_training="cuda",
