@@ -23,7 +23,7 @@ if __name__ == '__main__':
                       CLUSTER=False,
                       n_learner_actor_workers=1,
 
-                      max_buffer_size_adv=3000000,
+                      max_buffer_size_adv=1500000,
                       export_each_net=False,
                       checkpoint_freq=20,
                       eval_agent_export_freq=5,
