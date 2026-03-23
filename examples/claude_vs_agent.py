@@ -1,9 +1,12 @@
 """
-Claude's strategy plays 20 hands against the trained agent.
+Claude's strategy plays against the trained agent.
 Uses hand strength evaluation to make decisions.
+Default 100k hands, prints summary every 1k hands.
+Usage: python claude_vs_agent.py [n_hands]
 """
 import os
 import sys
+import argparse
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
@@ -11,8 +14,6 @@ from DeepCFR.EvalAgentDeepCFR import EvalAgentDeepCFR
 from PokerRL.game.Poker import Poker
 from PokerRL.game._.cpp_wrappers.CppHandeval import CppHandeval
 
-RANK_STR = {0:'2', 1:'3', 2:'4', 3:'5', 4:'6', 5:'7', 6:'8', 7:'9', 8:'T', 9:'J', 10:'Q', 11:'K', 12:'A'}
-SUIT_SYMBOL = {0:'\u2665', 1:'\u2666', 2:'\u2660', 3:'\u2663'}
 ACTION_NAMES = ['FOLD', 'CHECK/CALL', 'BET 33%', 'BET 50%', 'BET POT']
 
 hand_evaluator = CppHandeval()
@@ -143,7 +144,7 @@ def choose_action(hand_2d, board, legal_actions, pot, my_stack, opp_stack, curre
         return 0  # fold
 
 
-def play_match():
+def play_match(n_hands=100000, report_interval=1000):
     agent_base = os.path.expanduser('~/poker_ai_data/eval_agent/')
     agents = []
     for name in os.listdir(agent_base):
@@ -175,117 +176,90 @@ def play_match():
     env_args = agent.env_bldr.env_args
     env = env_cls(env_args=env_args, is_evaluating=True, lut_holder=env_cls.get_lut_holder())
 
-    n_hands = 20
-    winnings = 0
+    total_winnings = 0
+    interval_winnings = 0
     stats = {'my_folds': 0, 'ai_folds': 0, 'my_bets': 0, 'ai_bets': 0,
              'my_checks': 0, 'ai_checks': 0, 'showdowns': 0, 'scoops_me': 0,
              'scoops_ai': 0, 'splits': 0}
 
-    print(f"\n{'=' * 60}")
-    print(f"  CLAUDE STRATEGY vs TRAINED AGENT ({n_hands} hands)")
-    print(f"  Claude = P0 (in position), Agent = P1 (out of position)")
-    print(f"{'=' * 60}")
+    print(f"\n{'=' * 80}")
+    print(f"  CLAUDE STRATEGY vs {name} iter {iteration}  |  {n_hands:,} hands, report every {report_interval:,}")
+    print(f"  Positions alternate each hand (even=P0, odd=P1)")
+    print(f"{'=' * 80}")
+    print(f"  {'Hands':>8}  {'Interval':>10}  {'Total':>10}  {'mBB/hand':>10}  {'Showdowns':>10}  {'Scoops(C/A)':>12}  {'Splits':>7}")
+    print(f"  {'-'*8}  {'-'*10}  {'-'*10}  {'-'*10}  {'-'*10}  {'-'*12}  {'-'*7}")
 
     for hand_num in range(1, n_hands + 1):
-        print(f"\n{'~'*60}")
-        print(f"  HAND #{hand_num}    Running total: {winnings:+d}")
-        print(f"{'~'*60}")
+        # Alternate positions each hand: even hands Claude=P0, odd hands Claude=P1
+        claude_seat = hand_num % 2  # 0 or 1
+        agent_seat = 1 - claude_seat
 
         obs, _, done, _ = env.reset()
         agent.reset(deck_state_dict=env.cards_state_dict())
-
-        my_hand = env.seats[0].hand
-
-        # Show initial state
-        print(f"  Board 1: {board_str(env.board, 0, 5)}")
-        print(f"  Board 2: {board_str(env.board, 5, 10)}")
-        print(f"  My hand:  {hand_str(my_hand)}")
-        print(f"  Pot: {env.main_pot}")
+        my_hand = env.seats[claude_seat].hand
 
         while not done:
             p_id = env.current_player.seat_id
             legal = env.get_legal_actions()
 
-            if p_id == 0:
-                # Claude's turn
+            if p_id == claude_seat:
                 action = choose_action(
                     my_hand, env.board, legal, env.main_pot,
-                    env.seats[0].stack, env.seats[1].stack, env.current_round
+                    env.seats[claude_seat].stack, env.seats[agent_seat].stack, env.current_round
                 )
-                action_name = ACTION_NAMES[action] if action < len(ACTION_NAMES) else f'ACT_{action}'
-                print(f"    Claude: {action_name}")
-
                 if action == 0: stats['my_folds'] += 1
                 elif action == 1: stats['my_checks'] += 1
                 else: stats['my_bets'] += 1
 
                 action_tuple = env._get_env_adjusted_action_formulation(action)
                 action_tuple = env._get_fixed_action(action_tuple)
-                agent.notify_of_processed_tuple_action(action_he_did=action_tuple, p_id_acted=0)
+                agent.notify_of_processed_tuple_action(action_he_did=action_tuple, p_id_acted=claude_seat)
             else:
-                # Agent's turn
                 a_idx_raw, _ = agent.get_action(step_env=True, need_probs=False)
-                action_name = ACTION_NAMES[a_idx_raw] if a_idx_raw < len(ACTION_NAMES) else f'ACT_{a_idx_raw}'
-                print(f"    Agent:  {action_name}")
-
-                if a_idx_raw == 0: stats['ai_folds'] += 1
-                elif a_idx_raw == 1: stats['ai_checks'] += 1
+                action = a_idx_raw
+                if action == 0: stats['ai_folds'] += 1
+                elif action == 1: stats['ai_checks'] += 1
                 else: stats['ai_bets'] += 1
 
-                action_tuple = env._get_env_adjusted_action_formulation(a_idx_raw)
+                action_tuple = env._get_env_adjusted_action_formulation(action)
                 action_tuple = env._get_fixed_action(action_tuple)
 
             obs, rews, done, info = env._step(processed_action=action_tuple)
 
-        # Results
-        reward = int(np.rint(rews[0] * env.REWARD_SCALAR))
-        winnings += reward
+        reward = int(np.rint(rews[claude_seat] * env.REWARD_SCALAR))
+        total_winnings += reward
+        interval_winnings += reward
 
-        print(f"  Board 1: {board_str(env.board, 0, 5)}")
-        print(f"  Board 2: {board_str(env.board, 5, 10)}")
-        print(f"  My hand:  {hand_str(my_hand)}")
-        print(f"  AI hand:  {hand_str(env.seats[1].hand)}")
-
-        if reward > 0:
-            print(f"  >>> CLAUDE WINS {reward} chips <<<")
-        elif reward < 0:
-            print(f"  >>> Claude loses {-reward} chips <<<")
-        else:
-            print(f"  >>> Push <<<")
-
-        if env.seats[0].hand_rank_board1 > 0:
+        if hasattr(env.seats[claude_seat], 'hand_rank_board1') and env.seats[claude_seat].hand_rank_board1 > 0:
             stats['showdowns'] += 1
-            b1_me = env.seats[0].hand_rank_board1
-            b1_ai = env.seats[1].hand_rank_board1
-            b2_me = env.seats[0].hand_rank_board2
-            b2_ai = env.seats[1].hand_rank_board2
-            b1_w = 'Claude' if b1_me > b1_ai else ('Agent' if b1_ai > b1_me else 'Tie')
-            b2_w = 'Claude' if b2_me > b2_ai else ('Agent' if b2_ai > b2_me else 'Tie')
-            print(f"  Board 1: {b1_w}  Board 2: {b2_w}")
-
-            if b1_w == b2_w == 'Claude': stats['scoops_me'] += 1
-            elif b1_w == b2_w == 'Agent': stats['scoops_ai'] += 1
+            b1_me = env.seats[claude_seat].hand_rank_board1
+            b1_ai = env.seats[agent_seat].hand_rank_board1
+            b2_me = env.seats[claude_seat].hand_rank_board2
+            b2_ai = env.seats[agent_seat].hand_rank_board2
+            if b1_me > b1_ai and b2_me > b2_ai: stats['scoops_me'] += 1
+            elif b1_ai > b1_me and b2_ai > b2_me: stats['scoops_ai'] += 1
             else: stats['splits'] += 1
 
-    # Final summary
-    print(f"\n{'=' * 60}")
-    print(f"  FINAL RESULTS ({n_hands} hands)")
-    print(f"{'=' * 60}")
-    print(f"  Claude total: {winnings:+d} chips")
-    print(f"  Per hand: {winnings/n_hands:+.0f} chips/hand")
-    print(f"\n  Action stats:")
-    print(f"    Claude - bets: {stats['my_bets']}  checks: {stats['my_checks']}  folds: {stats['my_folds']}")
-    print(f"    Agent  - bets: {stats['ai_bets']}  checks: {stats['ai_checks']}  folds: {stats['ai_folds']}")
-    print(f"\n  Showdown stats ({stats['showdowns']} showdowns):")
-    print(f"    Claude scoops: {stats['scoops_me']}  Agent scoops: {stats['scoops_ai']}  Splits: {stats['splits']}")
+        if hand_num % report_interval == 0:
+            mbb_per_hand = (total_winnings / hand_num) * 1000.0 / 100.0
+            print(f"  {hand_num:>8,}  {interval_winnings:>+10,}  {total_winnings:>+10,}  {mbb_per_hand:>+10.1f}  {stats['showdowns']:>10,}  {stats['scoops_me']:>5,}/{stats['scoops_ai']:<5,}  {stats['splits']:>7,}")
+            interval_winnings = 0
 
-    if winnings > 0:
-        print(f"\n  CLAUDE STRATEGY WINS!")
-    elif winnings < 0:
-        print(f"\n  AGENT WINS!")
-    else:
-        print(f"\n  DRAW!")
+    # Final summary
+    mbb_per_hand = (total_winnings / n_hands) * 1000.0 / 100.0
+    print(f"\n{'=' * 80}")
+    print(f"  FINAL RESULTS  |  {n_hands:,} hands vs {name} iter {iteration}")
+    print(f"{'=' * 80}")
+    print(f"  Total: {total_winnings:+,} chips  |  {mbb_per_hand:+.1f} mBB/hand")
+    print(f"  Claude - bets: {stats['my_bets']:,}  checks: {stats['my_checks']:,}  folds: {stats['my_folds']:,}")
+    print(f"  Agent  - bets: {stats['ai_bets']:,}  checks: {stats['ai_checks']:,}  folds: {stats['ai_folds']:,}")
+    print(f"  Showdowns: {stats['showdowns']:,}  |  Claude scoops: {stats['scoops_me']:,}  Agent scoops: {stats['scoops_ai']:,}  Splits: {stats['splits']:,}")
+    print(f"\n  {'CLAUDE STRATEGY WINS!' if total_winnings > 0 else 'AGENT WINS!' if total_winnings < 0 else 'DRAW!'}")
 
 
 if __name__ == '__main__':
-    play_match()
+    parser = argparse.ArgumentParser()
+    parser.add_argument('n_hands', nargs='?', type=int, default=100000, help='Number of hands (default: 100000)')
+    parser.add_argument('--interval', type=int, default=1000, help='Report every N hands (default: 1000)')
+    args = parser.parse_args()
+    play_match(n_hands=args.n_hands, report_interval=args.interval)
