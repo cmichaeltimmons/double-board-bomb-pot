@@ -16,28 +16,28 @@ from DeepCFR.workers.driver.Driver import Driver
 
 if __name__ == '__main__':
     ctrl = Driver(t_prof=TrainingProfile(
-                      name="DBBP_PLO_HU_fixed_flop",
+                      name="DBBP_PLO_HU_fixed_flop_v2",
                       nn_type="dense_residual",
 
                       DISTRIBUTED=False,
                       CLUSTER=False,
                       n_learner_actor_workers=1,
 
-                      max_buffer_size_adv=1500000,
+                      max_buffer_size_adv=3000000,
                       export_each_net=False,
                       checkpoint_freq=20,
                       eval_agent_export_freq=5,
 
                       n_actions_traverser_samples=4,
-                      n_traversals_per_iter=50000,
-                      n_batches_adv_training=1500,
+                      n_traversals_per_iter=150000,
+                      n_batches_adv_training=3000,
 
                       use_pre_layers_adv=True,
                       n_cards_state_units_adv=192,
                       n_merge_and_table_layer_units_adv=64,
                       n_units_final_adv=64,
                       lr_patience_adv=350,
-                      lr_adv=0.004,
+                      lr_adv=0.001,
 
                       mini_batch_size_adv=5000,
                       init_adv_model="last",
@@ -69,7 +69,7 @@ if __name__ == '__main__':
                   ),
                   eval_methods={},
                   n_iterations=500,
-                  iteration_to_import=60,
-                  name_to_import="DBBP_PLO_HU_fixed_flop")
+                  iteration_to_import=130,
+                  name_to_import="DBBP_PLO_HU_fixed_flop_")
 
     ctrl.run()
