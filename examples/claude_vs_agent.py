@@ -15,6 +15,8 @@ from PokerRL.game.Poker import Poker
 from PokerRL.game._.cpp_wrappers.CppHandeval import CppHandeval
 
 ACTION_NAMES = ['FOLD', 'CHECK/CALL', 'BET 33%', 'BET 50%', 'BET POT']
+RANK_STR = '23456789TJQKA'
+SUIT_SYMBOL = ['h', 'd', 's', 'c']
 
 hand_evaluator = CppHandeval()
 
@@ -186,7 +188,7 @@ def play_match(n_hands=100000, report_interval=1000):
     print(f"  CLAUDE STRATEGY vs {name} iter {iteration}  |  {n_hands:,} hands, report every {report_interval:,}")
     print(f"  Positions alternate each hand (even=P0, odd=P1)")
     print(f"{'=' * 80}")
-    print(f"  {'Hands':>8}  {'Interval':>10}  {'Total':>10}  {'mBB/hand':>10}  {'Showdowns':>10}  {'Scoops(C/A)':>12}  {'Splits':>7}")
+    print(f"  {'Hands':>8}  {'Interval':>10}  {'Total':>10}  {'mA/hand':>10}  {'Showdowns':>10}  {'Scoops(C/A)':>12}  {'Splits':>7}")
     print(f"  {'-'*8}  {'-'*10}  {'-'*10}  {'-'*10}  {'-'*10}  {'-'*12}  {'-'*7}")
 
     for hand_num in range(1, n_hands + 1):
@@ -241,16 +243,16 @@ def play_match(n_hands=100000, report_interval=1000):
             else: stats['splits'] += 1
 
         if hand_num % report_interval == 0:
-            mbb_per_hand = (total_winnings / hand_num) * 1000.0 / 100.0
-            print(f"  {hand_num:>8,}  {interval_winnings:>+10,}  {total_winnings:>+10,}  {mbb_per_hand:>+10.1f}  {stats['showdowns']:>10,}  {stats['scoops_me']:>5,}/{stats['scoops_ai']:<5,}  {stats['splits']:>7,}")
+            ma_per_hand = (total_winnings / hand_num) * env.EV_NORMALIZER
+            print(f"  {hand_num:>8,}  {interval_winnings:>+10,}  {total_winnings:>+10,}  {ma_per_hand:>+10.1f}  {stats['showdowns']:>10,}  {stats['scoops_me']:>5,}/{stats['scoops_ai']:<5,}  {stats['splits']:>7,}")
             interval_winnings = 0
 
     # Final summary
-    mbb_per_hand = (total_winnings / n_hands) * 1000.0 / 100.0
+    ma_per_hand = (total_winnings / n_hands) * env.EV_NORMALIZER
     print(f"\n{'=' * 80}")
     print(f"  FINAL RESULTS  |  {n_hands:,} hands vs {name} iter {iteration}")
     print(f"{'=' * 80}")
-    print(f"  Total: {total_winnings:+,} chips  |  {mbb_per_hand:+.1f} mBB/hand")
+    print(f"  Total: {total_winnings:+,} chips  |  {ma_per_hand:+.1f} mA/hand")
     print(f"  Claude - bets: {stats['my_bets']:,}  checks: {stats['my_checks']:,}  folds: {stats['my_folds']:,}")
     print(f"  Agent  - bets: {stats['ai_bets']:,}  checks: {stats['ai_checks']:,}  folds: {stats['ai_folds']:,}")
     print(f"  Showdowns: {stats['showdowns']:,}  |  Claude scoops: {stats['scoops_me']:,}  Agent scoops: {stats['scoops_ai']:,}  Splits: {stats['splits']:,}")

@@ -117,7 +117,7 @@ class MainPokerModuleFLAT(nn.Module):
         if self.args.normalize:
             means = final.mean(dim=1, keepdim=True)
             stds = final.std(dim=1, keepdim=True)
-            final = (final - means) / stds
+            final = (final - means) / (stds + 1e-7)
 
         return final
 
