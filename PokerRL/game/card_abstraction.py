@@ -284,17 +284,26 @@ class CardAbstraction:
     def _compute_mc_equity_single(self, valid_indices, partial_board, all_board_cards_1d,
                                    card_2d_lut, hole_cards):
         """Monte Carlo equity for a single incomplete board (flop or turn)."""
+        import sys
         n_remaining = 5 - len(partial_board)
         deck_cards = list(range(self._rules.N_CARDS_IN_DECK))
 
         hand_equity = np.zeros(self._rules.RANGE_SIZE, dtype=np.float32)
 
+        # Pre-allocate contiguous buffers for C++ evaluator compatibility
+        full_board_2d = np.empty((5, 2), dtype=np.int8)
+        full_board_2d[:len(partial_board)] = partial_board
+        opp_2d = np.empty((self._rules.N_HOLE_CARDS, 2), dtype=np.int8)
+
         for i, ridx in enumerate(valid_indices):
-            if i % 10000 == 0:
+            if i % 1000 == 0:
                 print("    MC equity: hand {}/{}...".format(i, len(valid_indices)))
+                sys.stdout.flush()
 
             my_cards_1d = set(hole_cards[ridx].tolist())
-            my_hand_2d = np.array([card_2d_lut[c] for c in hole_cards[ridx]], dtype=np.int8)
+            my_hand_2d = np.ascontiguousarray(
+                np.array([card_2d_lut[c] for c in hole_cards[ridx]], dtype=np.int8)
+            )
             remaining = [c for c in deck_cards if c not in my_cards_1d and c not in all_board_cards_1d]
 
             wins = 0.0
@@ -306,11 +315,11 @@ class CardAbstraction:
                 opp_1d = drawn[:self._rules.N_HOLE_CARDS]
                 extra_board_1d = drawn[self._rules.N_HOLE_CARDS:]
 
-                full_board_2d = np.concatenate([
-                    partial_board,
-                    np.array([card_2d_lut[c] for c in extra_board_1d], dtype=np.int8)
-                ])
-                opp_2d = np.array([card_2d_lut[c] for c in opp_1d], dtype=np.int8)
+                # Fill pre-allocated buffers (avoids np.concatenate stride issues)
+                for j, c in enumerate(extra_board_1d):
+                    full_board_2d[len(partial_board) + j] = card_2d_lut[c]
+                for j, c in enumerate(opp_1d):
+                    opp_2d[j] = card_2d_lut[c]
 
                 rank_us = self._hand_eval.get_hand_rank_52_plo(my_hand_2d, full_board_2d)
                 rank_opp = self._hand_eval.get_hand_rank_52_plo(opp_2d, full_board_2d)

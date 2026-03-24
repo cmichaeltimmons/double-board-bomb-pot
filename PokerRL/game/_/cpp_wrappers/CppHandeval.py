@@ -76,9 +76,11 @@ class CppHandeval(CppWrapper):
             hand_2c_combs[n, 1] = hand_2d[i[1]]
         if self._use_python_fallback:
             return self._python_eval.get_hand_rank_52_plo(hand_2d, board_2d)
+        board_c = np.ascontiguousarray(board_2d, dtype=np.int8)
         maxres = -1
         for hand in hand_2c_combs:
-            res = self._clib.get_hand_rank_52_holdem(self.np_2d_arr_to_c(hand), self.np_2d_arr_to_c(board_2d))
+            hand_c = np.ascontiguousarray(hand, dtype=np.int8)
+            res = self._clib.get_hand_rank_52_holdem(self.np_2d_arr_to_c(hand_c), self.np_2d_arr_to_c(board_c))
             if res > maxres:
                 maxres = res
         return maxres
