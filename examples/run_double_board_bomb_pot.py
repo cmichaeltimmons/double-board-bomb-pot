@@ -29,7 +29,7 @@ if __name__ == '__main__':
                       eval_agent_export_freq=5,
 
                       n_actions_traverser_samples=4,
-                      n_traversals_per_iter=150000,
+                      n_traversals_per_iter=50000,
                       n_batches_adv_training=3000,
 
                       use_pre_layers_adv=True,
