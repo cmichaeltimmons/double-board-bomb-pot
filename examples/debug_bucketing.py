@@ -62,56 +62,66 @@ hole_cards = lut.LUT_IDX_2_HOLE_CARDS
 card_2d = lut.LUT_1DCARD_2_2DCARD
 hand_2d = np.array([card_2d[c] for c in hole_cards[0]], dtype=np.int8)
 
-# Get first 5-card board (dealt cards only)
+# Build a full 5-card board for testing (C++ evaluator requires exactly 5 cards)
 board_2d = np.copy(env.board)
 dealt = np.array([c for c in board_2d[:5] if c[0] != Poker.CARD_NOT_DEALT_TOKEN_1D], dtype=np.int8)
-print("   Test board: {}".format(dealt))
-rank = he.get_hand_rank_52_plo(hand_2d, dealt)
-print("   Test rank: {}".format(rank))
-print("   Done: {:.4f}s".format(time.time() - t0))
+print("   Dealt board cards (board 1): {} cards".format(len(dealt)))
 
-print("5. Timing 1000 evaluations...")
-t0 = time.time()
-for i in range(1000):
-    he.get_hand_rank_52_plo(hand_2d, dealt)
-dt = time.time() - t0
-print("   1000 evals: {:.3f}s ({:.1f} evals/sec)".format(dt, 1000 / dt))
-
-print("6. Testing MC equity for 100 hands (10 rollouts each)...")
-t0 = time.time()
-deck_cards = list(range(52))
+# Pad to 5 cards with random remaining cards for testing
 all_board_1d = set()
 for c in board_2d:
     if c[0] != Poker.CARD_NOT_DEALT_TOKEN_1D:
         all_board_1d.add(int(lut.LUT_2DCARD_2_1DCARD[c[0], c[1]]))
+my_cards_1d = set(hole_cards[0].tolist())
+remaining = [c for c in range(52) if c not in my_cards_1d and c not in all_board_1d]
+n_pad = 5 - len(dealt)
+if n_pad > 0:
+    pad_1d = np.random.choice(remaining, size=n_pad, replace=False)
+    test_board_5 = np.concatenate([dealt, np.array([card_2d[c] for c in pad_1d], dtype=np.int8)])
+    print("   Padded to 5 cards for eval test")
+else:
+    test_board_5 = dealt
+
+print("   Test board: {}".format(test_board_5))
+rank = he.get_hand_rank_52_plo(hand_2d, test_board_5)
+print("   Test rank: {}".format(rank))
+print("   Done: {:.4f}s".format(time.time() - t0))
+
+print("5. Timing 1000 PLO evaluations...")
+t0 = time.time()
+for i in range(1000):
+    he.get_hand_rank_52_plo(hand_2d, test_board_5)
+dt = time.time() - t0
+print("   1000 evals: {:.3f}s ({:.1f} PLO evals/sec)".format(dt, 1000 / dt))
+
+print("6. Testing MC equity for 100 hands (10 rollouts each)...")
+t0 = time.time()
+deck_cards = list(range(52))
 
 for ridx in range(100):
-    my_cards_1d = set(hole_cards[ridx].tolist())
-    my_hand_2d = np.array([card_2d[c] for c in hole_cards[ridx]], dtype=np.int8)
-    remaining = [c for c in deck_cards if c not in my_cards_1d and c not in all_board_1d]
-    n_remaining = 5 - len(dealt)
+    h_cards_1d = set(hole_cards[ridx].tolist())
+    h_hand_2d = np.array([card_2d[c] for c in hole_cards[ridx]], dtype=np.int8)
+    rem = [c for c in deck_cards if c not in h_cards_1d and c not in all_board_1d]
 
     for _ in range(10):
-        drawn = np.random.choice(remaining, size=4 + n_remaining, replace=False)
+        drawn = np.random.choice(rem, size=4 + n_pad, replace=False)
         opp_1d = drawn[:4]
         extra = drawn[4:]
         full_board = np.concatenate([dealt, np.array([card_2d[c] for c in extra], dtype=np.int8)])
         opp_2d = np.array([card_2d[c] for c in opp_1d], dtype=np.int8)
-        he.get_hand_rank_52_plo(my_hand_2d, full_board)
+        he.get_hand_rank_52_plo(h_hand_2d, full_board)
         he.get_hand_rank_52_plo(opp_2d, full_board)
 
 dt = time.time() - t0
 print("   100 hands x 10 rollouts x 2 evals = 2000 evals: {:.3f}s".format(dt))
 
-# Extrapolate
+# Extrapolate for different rollout counts
 total_hands = 163185
-total_evals = total_hands * 10 * 2  # 10 rollouts, 2 evals each
 rate = 2000 / dt
-est_time = total_evals / rate
-print("   Estimated time for full bucketing (163K hands, 10 rollouts): {:.0f}s ({:.1f} min)".format(
-    est_time, est_time / 60))
-est_500 = total_hands * 500 * 2 / rate
-print("   Estimated time for full bucketing (163K hands, 500 rollouts): {:.0f}s ({:.1f} min)".format(
-    est_500, est_500 / 60))
+for rollouts in [10, 50, 100, 500]:
+    total_evals = total_hands * rollouts * 2  # 2 boards
+    est_time = total_evals / rate
+    print("   Est. bucketing time ({} rollouts, 2 boards): {:.0f}s ({:.1f} min)".format(
+        rollouts, est_time, est_time / 60))
 
 print("\nDone!")
