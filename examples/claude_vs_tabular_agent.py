@@ -313,18 +313,31 @@ class ESMCCFRAgent:
         print("  Computing rank boundaries...")
         self._rank_boundaries = self._compute_rank_boundaries(flop_board)
 
-        # Load strategy
+        # Load strategy — supports both strategy files and checkpoint files
         print("  Loading strategy from {}...".format(strategy_path))
         self._strategy = {}
         data = np.load(strategy_path, allow_pickle=True)
-        for str_key in data.files:
-            key = eval(str_key)  # (round, action_history_tuple)
-            strat = data[str_key]
-            # Normalize rows
-            row_sums = strat.sum(axis=1, keepdims=True)
-            uniform = np.ones_like(strat) / max(strat.shape[1], 1)
-            with np.errstate(divide='ignore', invalid='ignore'):
-                self._strategy[key] = np.where(row_sums > 0, strat / row_sums, uniform)
+
+        if 'n_info_sets' in data.files:
+            # Checkpoint format: key_0, strat_0, regret_0, ...
+            import ast
+            n = int(data['n_info_sets'][0])
+            for i in range(n):
+                key = ast.literal_eval(str(data['key_{}'.format(i)][0]))
+                strat = data['strat_{}'.format(i)].astype(np.float64)
+                row_sums = strat.sum(axis=1, keepdims=True)
+                uniform = np.ones_like(strat) / max(strat.shape[1], 1)
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    self._strategy[key] = np.where(row_sums > 0, strat / row_sums, uniform)
+        else:
+            # Strategy format: repr(key) -> strategy array
+            for str_key in data.files:
+                key = eval(str_key)
+                strat = data[str_key]
+                row_sums = strat.sum(axis=1, keepdims=True)
+                uniform = np.ones_like(strat) / max(strat.shape[1], 1)
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    self._strategy[key] = np.where(row_sums > 0, strat / row_sums, uniform)
 
         print("  Loaded {} info sets.".format(len(self._strategy)))
         print("  Agent ready.")
