@@ -73,8 +73,16 @@ class ExternalSamplingMCCFR:
         self._iter_counter = 0
         self._metrics = []
 
-        # Per-iteration bucket cache: round -> bucket array (RANGE_SIZE,)
-        self._iter_bucket_cache = {}
+        # Precompute flop buckets once (fixed board) and reuse for all streets.
+        # This avoids recomputing buckets every iteration for random turn/river cards.
+        print("Precomputing flop buckets (one-time)...")
+        import sys
+        sys.stdout.flush()
+        self._env.reset()
+        flop_board = np.copy(self._env.board)
+        self._flop_buckets = self._card_abs.get_postflop_buckets(flop_board)
+        print("Flop buckets ready.")
+        sys.stdout.flush()
 
     @property
     def name(self):
@@ -88,8 +96,6 @@ class ExternalSamplingMCCFR:
         """Run one ES-MCCFR iteration (traverse once per player role)."""
         for traverser in range(self._n_seats):
             self._env.reset()
-            self._iter_bucket_cache = {}
-            self._cache_buckets_for_round(self._env.current_round)
             self._traverse(traverser, action_history=())
 
         self._iter_counter += 1
@@ -213,17 +219,11 @@ class ExternalSamplingMCCFR:
 
         for a in legal_actions:
             self._env.load_state_dict(saved_state)
-            prev_round = self._env.current_round
-
             obs, reward, done, info = self._env.step(a)
 
             if done:
                 action_values[a] = float(reward[traverser])
             else:
-                new_round = self._env.current_round
-                if new_round != prev_round:
-                    self._cache_buckets_for_round(new_round)
-
                 new_history = action_history + (a,)
                 action_values[a] = self._traverse(traverser, new_history)
 
@@ -258,15 +258,10 @@ class ExternalSamplingMCCFR:
         sampled_idx = np.random.choice(len(legal_actions), p=probs)
         sampled_action = legal_actions[sampled_idx]
 
-        prev_round = self._env.current_round
         obs, reward, done, info = self._env.step(sampled_action)
 
         if done:
             return float(reward[traverser])
-
-        new_round = self._env.current_round
-        if new_round != prev_round:
-            self._cache_buckets_for_round(new_round)
 
         new_history = action_history + (sampled_action,)
         return self._traverse(traverser, new_history)
@@ -307,15 +302,7 @@ class ExternalSamplingMCCFR:
         return strategy
 
     def _get_bucket(self, current_round, range_idx):
-        buckets = self._iter_bucket_cache.get(current_round)
-        if buckets is None:
-            self._cache_buckets_for_round(current_round)
-            buckets = self._iter_bucket_cache[current_round]
-        b = int(buckets[range_idx])
+        b = int(self._flop_buckets[range_idx])
         if b < 0:
             return 0  # blocked hand fallback
         return b
-
-    def _cache_buckets_for_round(self, current_round):
-        board_2d = np.copy(self._env.board)
-        self._iter_bucket_cache[current_round] = self._card_abs.get_postflop_buckets(board_2d)
