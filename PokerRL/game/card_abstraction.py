@@ -251,33 +251,71 @@ class CardAbstraction:
         return buckets
 
     def _compute_river_equity_single(self, valid_indices, board_5, all_board_cards_1d):
-        """Exact equity on a single complete 5-card board."""
+        """Exact equity on a single complete 5-card board (vectorized)."""
+        import sys
         hole_cards = self._lut.LUT_IDX_2_HOLE_CARDS
         card_2d_lut = self._lut.LUT_1DCARD_2_2DCARD
+        board_5_c = np.ascontiguousarray(board_5, dtype=np.int8)
 
+        # Step 1: compute hand rank for all valid hands
+        print("    Computing hand ranks for {} hands...".format(len(valid_indices)))
+        sys.stdout.flush()
         hand_ranks = np.full(self._rules.RANGE_SIZE, -1, dtype=np.int32)
-        for ridx in valid_indices:
-            hand_2d = np.array([card_2d_lut[c] for c in hole_cards[ridx]], dtype=np.int8)
-            hand_ranks[ridx] = self._hand_eval.get_hand_rank_52_plo(hand_2d, board_5)
+        for i, ridx in enumerate(valid_indices):
+            if i % 10000 == 0:
+                print("    Ranking hand {}/{}...".format(i, len(valid_indices)))
+                sys.stdout.flush()
+            hand_2d = np.ascontiguousarray(
+                np.array([card_2d_lut[c] for c in hole_cards[ridx]], dtype=np.int8)
+            )
+            hand_ranks[ridx] = self._hand_eval.get_hand_rank_52_plo(hand_2d, board_5_c)
 
+        # Step 2: vectorized equity via rank comparison
+        # Build blocked-cards set per valid hand for fast overlap detection
+        print("    Computing pairwise equity (vectorized)...")
+        sys.stdout.flush()
+        valid_ranks = hand_ranks[valid_indices]  # (N,)
+        valid_hole = hole_cards[valid_indices]    # (N, 4) 1D card indices
+        N = len(valid_indices)
+
+        # Build card sets as sorted tuples for fast overlap check using numpy
+        # For each pair, hands overlap if they share any card
+        # Vectorize: expand hole cards to (N, 4) and check pairwise overlap
+        # Process in chunks to avoid memory issues
         hand_equity = np.zeros(self._rules.RANGE_SIZE, dtype=np.float32)
-        for ridx in valid_indices:
-            my_cards = set(hole_cards[ridx].tolist())
-            my_rank = hand_ranks[ridx]
-            wins = 0.0
-            total = 0
-            for oidx in valid_indices:
-                if oidx == ridx:
-                    continue
-                if my_cards & set(hole_cards[oidx].tolist()):
-                    continue
-                opp_rank = hand_ranks[oidx]
-                if my_rank > opp_rank:
-                    wins += 1.0
-                elif my_rank == opp_rank:
-                    wins += 0.5
-                total += 1
-            hand_equity[ridx] = wins / total if total > 0 else 0.5
+        CHUNK = 1000
+        for start in range(0, N, CHUNK):
+            if start % 10000 == 0:
+                print("    Equity chunk {}/{}...".format(start, N))
+                sys.stdout.flush()
+            end = min(start + CHUNK, N)
+            chunk_ranks = valid_ranks[start:end]  # (C,)
+            chunk_holes = valid_hole[start:end]    # (C, 4)
+
+            # Check card overlap: for each (chunk_hand, valid_hand) pair,
+            # do they share any card? Check all 4x4 card combinations.
+            overlap = np.zeros((end - start, N), dtype=bool)
+            for ci in range(4):
+                for oi in range(4):
+                    overlap |= (chunk_holes[:, ci:ci+1] == valid_hole[:, oi:oi+1].T)
+
+            # Rank comparison: (C, 1) vs (1, N)
+            wins = (chunk_ranks[:, None] > valid_ranks[None, :]).astype(np.float32)
+            ties = (chunk_ranks[:, None] == valid_ranks[None, :]).astype(np.float32) * 0.5
+
+            # Mask out self and overlapping hands
+            mask = ~overlap
+            # Also mask self-comparisons
+            idx_range = np.arange(start, end)
+            for local_i, global_i in enumerate(idx_range):
+                mask[local_i, global_i] = False
+
+            total = mask.sum(axis=1).astype(np.float32)
+            win_sum = ((wins + ties) * mask).sum(axis=1)
+
+            equity = np.where(total > 0, win_sum / total, 0.5)
+            for local_i in range(end - start):
+                hand_equity[valid_indices[start + local_i]] = equity[local_i]
 
         return hand_equity
 
