@@ -1,10 +1,13 @@
 """
-Claude's strategy plays against the trained tabular CFR agent.
-Loads a saved .npz strategy from AbstractedCFR and plays DBBP PLO.
+Claude's strategy plays against a trained CFR agent.
+Supports both tree-based CFR and ES-MCCFR strategies.
 
 Usage:
-    python examples/claude_vs_tabular_agent.py --strategy /workspace/strategies/DBBP_PLO_200b_1000iter_plus.npz
-    python examples/claude_vs_tabular_agent.py --strategy strategies/DBBP_PLO_200b_1000iter_plus.npz --n-hands 50000
+    # ES-MCCFR strategy (default):
+    python examples/claude_vs_tabular_agent.py --algo es-mccfr --strategy ./strategies/DBBP_PLO_50b_10000iter_plus_esmccfr.npz --n-buckets 50
+
+    # Tree-based CFR strategy:
+    python examples/claude_vs_tabular_agent.py --algo tree-cfr --strategy ./strategies/DBBP_PLO_200b_1000iter_plus.npz --n-buckets 200
 """
 
 import os
@@ -258,20 +261,233 @@ class TabularCFRAgent:
                 return
 
 
-def play_match(strategy_path, n_hands=100000, report_interval=1000,
-               n_buckets=200, cache_dir='./abstraction_cache'):
+# ──────────────────────────────────────────────────────────────────────────────
+# ES-MCCFR Agent
+# ──────────────────────────────────────────────────────────────────────────────
 
-    agent = TabularCFRAgent(strategy_path, n_buckets=n_buckets, cache_dir=cache_dir)
+class ESMCCFRAgent:
+    """
+    Plays using a saved ES-MCCFR strategy.
+    Tracks (round, action_history) to look up info sets.
+    Uses flop equity buckets + rank-based turn/river bucketing.
+    """
+
+    def __init__(self, strategy_path, n_buckets=50, n_rollouts=10,
+                 cache_dir='./abstraction_cache', bet_set=None):
+        print("Building ES-MCCFR agent...")
+
+        self._n_buckets = n_buckets
+        game_cls = DoubleBoardBombPotPLO
+
+        if bet_set is None:
+            bet_set = bet_sets.PL_2
+
+        self._env_args = game_cls.ARGS_CLS(
+            n_seats=2,
+            starting_stack_sizes_list=[game_cls.DEFAULT_STACK_SIZE, game_cls.DEFAULT_STACK_SIZE],
+            bet_sizes_list_as_frac_of_pot=bet_set,
+        )
+        self._env_bldr = HistoryEnvBuilder(
+            env_cls=get_env_cls_from_str(game_cls.__name__),
+            env_args=self._env_args,
+        )
+        self._lut = self._env_bldr.lut_holder
+        self._n_actions = self._env_args.N_ACTIONS
+
+        self._card_abs = CardAbstraction(
+            rules=self._env_bldr.rules,
+            lut_holder=self._lut,
+            n_buckets=n_buckets,
+            n_rollouts=n_rollouts,
+            cache_dir=cache_dir,
+        )
+
+        # Precompute flop buckets
+        print("  Loading flop buckets...")
+        temp_env = self._env_bldr.get_new_env(is_evaluating=True)
+        temp_env.reset()
+        flop_board = np.copy(temp_env.board)
+        self._flop_buckets = self._card_abs.get_postflop_buckets(flop_board)
+
+        # Precompute rank boundaries for turn/river bucketing
+        print("  Computing rank boundaries...")
+        self._rank_boundaries = self._compute_rank_boundaries(flop_board)
+
+        # Load strategy
+        print("  Loading strategy from {}...".format(strategy_path))
+        self._strategy = {}
+        data = np.load(strategy_path, allow_pickle=True)
+        for str_key in data.files:
+            key = eval(str_key)  # (round, action_history_tuple)
+            strat = data[str_key]
+            # Normalize rows
+            row_sums = strat.sum(axis=1, keepdims=True)
+            uniform = np.ones_like(strat) / max(strat.shape[1], 1)
+            with np.errstate(divide='ignore', invalid='ignore'):
+                self._strategy[key] = np.where(row_sums > 0, strat / row_sums, uniform)
+
+        print("  Loaded {} info sets.".format(len(self._strategy)))
+        print("  Agent ready.")
+
+        self._action_history = ()
+        self._current_round = None
+
+    def reset(self):
+        self._action_history = ()
+        self._current_round = None
+
+    def set_round(self, current_round):
+        self._current_round = current_round
+
+    def get_action(self, hand_2d, board, legal_actions, current_round):
+        """Choose action from the ES-MCCFR average strategy."""
+        range_idx = self._lut.get_range_idx_from_hole_cards(hand_2d)
+        bucket = self._get_bucket(current_round, range_idx, board)
+
+        info_key = (current_round, self._action_history)
+
+        if info_key in self._strategy:
+            strat_row = self._strategy[info_key][bucket]
+            # Map strategy indices to legal actions
+            action_probs = np.zeros(len(legal_actions), dtype=np.float64)
+            for i, a in enumerate(legal_actions):
+                if a < len(strat_row):
+                    action_probs[i] = max(strat_row[a], 0)
+            total = action_probs.sum()
+            if total > 0:
+                action_probs /= total
+            else:
+                action_probs = np.ones(len(legal_actions)) / len(legal_actions)
+            chosen_idx = np.random.choice(len(legal_actions), p=action_probs)
+            return legal_actions[chosen_idx]
+        else:
+            # Info set not seen during training — play uniform random
+            return np.random.choice(legal_actions)
+
+    def advance(self, action):
+        self._action_history = self._action_history + (action,)
+
+    def _get_bucket(self, current_round, range_idx, board):
+        if current_round == Poker.FLOP:
+            b = int(self._flop_buckets[range_idx])
+            return max(b, 0)
+
+        # Turn/River: rank-based bucketing
+        rank = self._eval_hand_on_boards(range_idx, board)
+        b = int(np.searchsorted(self._rank_boundaries, rank))
+        return min(b, self._n_buckets - 1)
+
+    def _eval_hand_on_boards(self, range_idx, board):
+        hole_cards = self._lut.LUT_IDX_2_HOLE_CARDS[range_idx]
+        card_2d_lut = self._lut.LUT_1DCARD_2_2DCARD
+        hand_2d = np.ascontiguousarray(
+            np.array([card_2d_lut[c] for c in hole_cards], dtype=np.int8)
+        )
+        total_slots = len(board)
+        ranks = []
+        for start in range(0, total_slots, 5):
+            end = min(start + 5, total_slots)
+            board_slice = board[start:end]
+            dealt = [c for c in board_slice if c[0] != Poker.CARD_NOT_DEALT_TOKEN_1D]
+            if len(dealt) < 3:
+                continue
+            board_5 = np.empty((5, 2), dtype=np.int8)
+            for i, c in enumerate(dealt):
+                board_5[i] = c
+            if len(dealt) < 5:
+                hand_1d = set(hole_cards.tolist())
+                board_1d = set()
+                for c in dealt:
+                    board_1d.add(int(self._lut.LUT_2DCARD_2_1DCARD[c[0], c[1]]))
+                pad_idx = len(dealt)
+                for pad_c in range(52):
+                    if pad_c not in hand_1d and pad_c not in board_1d:
+                        board_5[pad_idx] = card_2d_lut[pad_c]
+                        board_1d.add(pad_c)
+                        pad_idx += 1
+                        if pad_idx >= 5:
+                            break
+            board_5 = np.ascontiguousarray(board_5)
+            rank = hand_evaluator.get_hand_rank_52_plo(hand_2d, board_5)
+            ranks.append(rank)
+        if not ranks:
+            return 0
+        return sum(ranks) / len(ranks)
+
+    def _compute_rank_boundaries(self, flop_board):
+        valid_mask = self._card_abs.get_blocked_mask(flop_board)
+        valid_indices = np.where(valid_mask)[0]
+        hole_cards = self._lut.LUT_IDX_2_HOLE_CARDS
+        card_2d_lut = self._lut.LUT_1DCARD_2_2DCARD
+
+        boards_5 = []
+        total_slots = len(flop_board)
+        for start in range(0, total_slots, 5):
+            end = min(start + 5, total_slots)
+            dealt = np.array(
+                [c for c in flop_board[start:end] if c[0] != Poker.CARD_NOT_DEALT_TOKEN_1D],
+                dtype=np.int8
+            )
+            if len(dealt) > 0:
+                if len(dealt) < 5:
+                    board_1d = set()
+                    for c in dealt:
+                        board_1d.add(int(self._lut.LUT_2DCARD_2_1DCARD[c[0], c[1]]))
+                    padded = np.empty((5, 2), dtype=np.int8)
+                    padded[:len(dealt)] = dealt
+                    pad_idx = len(dealt)
+                    for pc in range(52):
+                        if pc not in board_1d:
+                            padded[pad_idx] = card_2d_lut[pc]
+                            board_1d.add(pc)
+                            pad_idx += 1
+                            if pad_idx >= 5:
+                                break
+                    dealt = np.ascontiguousarray(padded)
+                boards_5.append(dealt)
+
+        sample_size = min(5000, len(valid_indices))
+        sample_idx = np.random.choice(valid_indices, size=sample_size, replace=False)
+        ranks = []
+        for ridx in sample_idx:
+            hand_2d = np.ascontiguousarray(
+                np.array([card_2d_lut[c] for c in hole_cards[ridx]], dtype=np.int8)
+            )
+            avg_rank = 0.0
+            for board in boards_5:
+                avg_rank += hand_evaluator.get_hand_rank_52_plo(hand_2d, board)
+            avg_rank /= len(boards_5)
+            ranks.append(avg_rank)
+
+        ranks = np.array(ranks)
+        percentiles = np.linspace(0, 100, self._n_buckets + 1)[1:-1]
+        return np.percentile(ranks, percentiles)
+
+
+def play_match(strategy_path, n_hands=100000, report_interval=1000,
+               n_buckets=200, algo='es-mccfr', cache_dir='./abstraction_cache',
+               n_rollouts=10):
+
+    use_es_mccfr = (algo == 'es-mccfr')
+
+    if use_es_mccfr:
+        agent = ESMCCFRAgent(strategy_path, n_buckets=n_buckets,
+                             n_rollouts=n_rollouts, cache_dir=cache_dir)
+        bet_set = bet_sets.PL_2
+    else:
+        agent = TabularCFRAgent(strategy_path, n_buckets=n_buckets, cache_dir=cache_dir)
+        bet_set = bet_sets.POT_ONLY
 
     game_cls = DoubleBoardBombPotPLO
     env_args = game_cls.ARGS_CLS(
         n_seats=2,
         starting_stack_sizes_list=[game_cls.DEFAULT_STACK_SIZE, game_cls.DEFAULT_STACK_SIZE],
-        bet_sizes_list_as_frac_of_pot=bet_sets.POT_ONLY,
+        bet_sizes_list_as_frac_of_pot=bet_set,
     )
     env = game_cls(env_args=env_args, is_evaluating=True,
                    lut_holder=game_cls.get_lut_holder())
 
+    algo_label = 'ES-MCCFR' if use_es_mccfr else 'Tree CFR'
     total_winnings = 0
     interval_winnings = 0
     stats = {'my_folds': 0, 'ai_folds': 0, 'my_bets': 0, 'ai_bets': 0,
@@ -279,8 +495,8 @@ def play_match(strategy_path, n_hands=100000, report_interval=1000,
              'scoops_ai': 0, 'splits': 0}
 
     print("\n" + "=" * 80)
-    print("  CLAUDE STRATEGY vs TABULAR CFR  |  {:,} hands, report every {:,}".format(
-        n_hands, report_interval))
+    print("  CLAUDE STRATEGY vs {} ({} buckets)  |  {:,} hands".format(
+        algo_label, n_buckets, n_hands))
     print("  Positions alternate each hand (even=P0, odd=P1)")
     print("=" * 80)
     print("  {:>8}  {:>10}  {:>10}  {:>10}  {:>10}  {:>12}  {:>7}".format(
@@ -294,7 +510,10 @@ def play_match(strategy_path, n_hands=100000, report_interval=1000,
 
         obs, _, done, _ = env.reset()
         agent.reset()
-        agent.advance_to_board(env.board.copy())
+        if use_es_mccfr:
+            agent.set_round(env.current_round)
+        else:
+            agent.advance_to_board(env.board.copy())
 
         my_hand = env.seats[claude_seat].hand
         last_round = env.current_round
@@ -314,7 +533,10 @@ def play_match(strategy_path, n_hands=100000, report_interval=1000,
                 else: stats['my_bets'] += 1
             else:
                 ai_hand = env.seats[agent_seat].hand
-                action = agent.get_action(ai_hand, legal)
+                if use_es_mccfr:
+                    action = agent.get_action(ai_hand, env.board, legal, env.current_round)
+                else:
+                    action = agent.get_action(ai_hand, legal)
                 if action == 0: stats['ai_folds'] += 1
                 elif action == 1: stats['ai_checks'] += 1
                 else: stats['ai_bets'] += 1
@@ -326,7 +548,10 @@ def play_match(strategy_path, n_hands=100000, report_interval=1000,
             agent.advance(action)
 
             if not done and env.current_round != last_round:
-                agent.advance_to_board(env.board.copy())
+                if use_es_mccfr:
+                    agent.set_round(env.current_round)
+                else:
+                    agent.advance_to_board(env.board.copy())
                 last_round = env.current_round
 
         reward = int(np.rint(rews[claude_seat] * env.REWARD_SCALAR))
@@ -368,15 +593,19 @@ def play_match(strategy_path, n_hands=100000, report_interval=1000,
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Claude vs Tabular CFR Agent')
+    parser = argparse.ArgumentParser(description='Claude vs CFR Agent')
+    parser.add_argument('--algo', choices=['es-mccfr', 'tree-cfr'], default='es-mccfr',
+                        help='Algorithm used for training (default: es-mccfr)')
     parser.add_argument('--strategy', type=str, required=True,
                         help='Path to saved .npz strategy file')
     parser.add_argument('--n-hands', type=int, default=100000,
                         help='Number of hands (default: 100000)')
     parser.add_argument('--interval', type=int, default=1000,
                         help='Report every N hands (default: 1000)')
-    parser.add_argument('--n-buckets', type=int, default=200,
-                        help='Number of buckets (must match training)')
+    parser.add_argument('--n-buckets', type=int, default=50,
+                        help='Number of buckets (must match training, default: 50)')
+    parser.add_argument('--rollouts', type=int, default=10,
+                        help='MC rollouts for bucketing (must match training, default: 10)')
     parser.add_argument('--cache-dir', type=str, default='./abstraction_cache',
                         help='Abstraction cache directory (must match training)')
     args = parser.parse_args()
@@ -386,5 +615,7 @@ if __name__ == '__main__':
         n_hands=args.n_hands,
         report_interval=args.interval,
         n_buckets=args.n_buckets,
+        algo=args.algo,
         cache_dir=args.cache_dir,
+        n_rollouts=args.rollouts,
     )
