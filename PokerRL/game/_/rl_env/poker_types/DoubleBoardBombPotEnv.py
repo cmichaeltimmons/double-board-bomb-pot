@@ -180,9 +180,12 @@ class DoubleBoardBombPotEnv(DiscretizedPokerEnv):
 
     def _payout_pots_hu(self):
         """Heads-up payout with double board 50/50 split."""
-        half_pot = self.main_pot / 2
+        total = int(self.main_pot)
+        half1 = total // 2
+        half2 = total - half1  # half2 gets the extra chip if pot is odd
 
-        for board_attr in ['hand_rank_board1', 'hand_rank_board2']:
+        for i, board_attr in enumerate(['hand_rank_board1', 'hand_rank_board2']):
+            half_pot = half1 if i == 0 else half2
             r0 = getattr(self.seats[0], board_attr)
             r1 = getattr(self.seats[1], board_attr)
 
@@ -191,8 +194,9 @@ class DoubleBoardBombPotEnv(DiscretizedPokerEnv):
             elif r0 < r1:
                 self.seats[1].award(half_pot)
             else:
-                self.seats[0].award(half_pot / 2)
-                self.seats[1].award(half_pot / 2)
+                share = half_pot // 2
+                self.seats[0].award(share)
+                self.seats[1].award(half_pot - share)
 
         self.main_pot = 0
 
@@ -203,27 +207,30 @@ class DoubleBoardBombPotEnv(DiscretizedPokerEnv):
         pot_and_pot_ranks = np.array((pots, pot_ranks)).T
 
         for e in pot_and_pot_ranks:
-            pot = e[0]
+            pot = int(e[0])
             rank = e[1]
             eligible_players = [p for p in self.seats if p.side_pot_rank >= rank and not p.folded_this_episode]
 
             if len(eligible_players) > 0:
-                half_pot = pot / 2
+                half1 = pot // 2
+                half2 = pot - half1
 
-                for board_attr in ['hand_rank_board1', 'hand_rank_board2']:
+                for i, board_attr in enumerate(['hand_rank_board1', 'hand_rank_board2']):
+                    half_pot = half1 if i == 0 else half2
                     self._award_half_pot(half_pot, eligible_players, board_attr)
 
         self.side_pots = [0] * self.N_SEATS
         self.main_pot = 0
 
     def _award_half_pot(self, half_pot, eligible_players, board_attr):
-        """Award half of a pot based on hand ranks on a specific board."""
+        """Award half of a pot based on hand ranks on a specific board.
+        half_pot must be an integer (ensured by callers using // arithmetic)."""
         best_rank = max(getattr(p, board_attr) for p in eligible_players)
         winners = [p for p in eligible_players if getattr(p, board_attr) == best_rank]
         num_winners = len(winners)
 
-        chips_per_winner = int(half_pot / num_winners)
-        remainder = int(half_pot) % num_winners
+        chips_per_winner = half_pot // num_winners
+        remainder = half_pot % num_winners
 
         for p in winners:
             p.award(chips_per_winner)
