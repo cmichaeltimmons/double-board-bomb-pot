@@ -12,6 +12,7 @@ import time
 import numpy as np
 
 from PokerRL.game.card_abstraction import CardAbstraction
+from PokerRL.game.Poker import Poker
 from PokerRL.game.wrappers import HistoryEnvBuilder
 from PokerRL.rl.rl_util import get_env_cls_from_str
 
@@ -27,6 +28,7 @@ class ExternalSamplingMCCFR:
                  starting_stack_sizes=None,
                  n_rollouts=500,
                  cache_dir='./abstraction_cache'):
+        import sys
         self._name = name
         self._n_buckets = n_buckets
         self._variant = variant
@@ -73,15 +75,24 @@ class ExternalSamplingMCCFR:
         self._iter_counter = 0
         self._metrics = []
 
-        # Precompute flop buckets once (fixed board) and reuse for all streets.
-        # This avoids recomputing buckets every iteration for random turn/river cards.
+        # Precompute flop buckets (one-time, cached to disk).
         print("Precomputing flop buckets (one-time)...")
-        import sys
         sys.stdout.flush()
         self._env.reset()
         flop_board = np.copy(self._env.board)
         self._flop_buckets = self._card_abs.get_postflop_buckets(flop_board)
         print("Flop buckets ready.")
+        sys.stdout.flush()
+
+        # Precompute rank-based bucket boundaries for turn/river.
+        # Evaluate all valid hands on flop boards to get rank distribution,
+        # then use percentile boundaries to instantly bucket any hand on any board.
+        print("Precomputing rank bucket boundaries...")
+        sys.stdout.flush()
+        self._lut = self._env_bldr.lut_holder
+        self._hand_eval = self._card_abs._hand_eval
+        self._rank_boundaries = self._compute_rank_boundaries(flop_board)
+        print("Rank boundaries ready ({} boundaries).".format(len(self._rank_boundaries)))
         sys.stdout.flush()
 
     @property
@@ -302,7 +313,123 @@ class ExternalSamplingMCCFR:
         return strategy
 
     def _get_bucket(self, current_round, range_idx):
-        b = int(self._flop_buckets[range_idx])
-        if b < 0:
-            return 0  # blocked hand fallback
-        return b
+        """
+        Per-street bucketing:
+        - Flop: precomputed equity buckets (MC rollouts, cached)
+        - Turn/River: instant rank-based buckets using current board
+        """
+        if current_round == Poker.FLOP:
+            b = int(self._flop_buckets[range_idx])
+            return max(b, 0)
+
+        # Turn or River: evaluate hand on current boards, bucket by rank
+        board_2d = self._env.board
+        rank = self._eval_hand_on_boards(range_idx, board_2d)
+        b = int(np.searchsorted(self._rank_boundaries, rank))
+        return min(b, self._n_buckets - 1)
+
+    def _eval_hand_on_boards(self, range_idx, board_2d):
+        """Evaluate a single hand's average rank across all boards (DBBP has 2)."""
+        hole_cards = self._lut.LUT_IDX_2_HOLE_CARDS[range_idx]
+        card_2d_lut = self._lut.LUT_1DCARD_2_2DCARD
+        hand_2d = np.ascontiguousarray(
+            np.array([card_2d_lut[c] for c in hole_cards], dtype=np.int8)
+        )
+
+        total_slots = len(board_2d)
+        ranks = []
+        for start in range(0, total_slots, 5):
+            end = min(start + 5, total_slots)
+            board_slice = board_2d[start:end]
+            dealt = [c for c in board_slice if c[0] != Poker.CARD_NOT_DEALT_TOKEN_1D]
+            if len(dealt) < 3:
+                continue
+            # Pad to 5 cards if needed (turn = 4 cards, need 1 random)
+            board_5 = np.empty((5, 2), dtype=np.int8)
+            for i, c in enumerate(dealt):
+                board_5[i] = c
+            if len(dealt) < 5:
+                # For turn (4 cards), use a neutral padding — just evaluate with dealt cards
+                # Actually, the evaluator needs 5 cards. Use the dealt cards and pad with
+                # a deterministic extra card that doesn't conflict.
+                hand_1d = set(hole_cards.tolist())
+                board_1d = set()
+                for c in dealt:
+                    board_1d.add(int(self._lut.LUT_2DCARD_2_1DCARD[c[0], c[1]]))
+                for pad_c in range(52):
+                    if pad_c not in hand_1d and pad_c not in board_1d:
+                        board_5[len(dealt)] = card_2d_lut[pad_c]
+                        if len(dealt) + 1 < 5:
+                            # Need another pad card (flop = 3 cards, need 2 more)
+                            board_1d.add(pad_c)
+                            for pad_c2 in range(pad_c + 1, 52):
+                                if pad_c2 not in hand_1d and pad_c2 not in board_1d:
+                                    board_5[len(dealt) + 1] = card_2d_lut[pad_c2]
+                                    break
+                        break
+            board_5 = np.ascontiguousarray(board_5)
+            rank = self._hand_eval.get_hand_rank_52_plo(hand_2d, board_5)
+            ranks.append(rank)
+
+        if not ranks:
+            return 0
+        return sum(ranks) / len(ranks)
+
+    def _compute_rank_boundaries(self, flop_board):
+        """
+        Compute percentile boundaries for rank-based bucketing.
+        Evaluates all valid hands on the flop boards to get a rank distribution,
+        then returns the percentile cutoff values for n_buckets bins.
+        """
+        valid_mask = self._card_abs.get_blocked_mask(flop_board)
+        valid_indices = np.where(valid_mask)[0]
+        hole_cards = self._lut.LUT_IDX_2_HOLE_CARDS
+        card_2d_lut = self._lut.LUT_1DCARD_2_2DCARD
+
+        # Split into individual boards
+        boards_5 = []
+        total_slots = len(flop_board)
+        for start in range(0, total_slots, 5):
+            end = min(start + 5, total_slots)
+            dealt = np.array(
+                [c for c in flop_board[start:end] if c[0] != Poker.CARD_NOT_DEALT_TOKEN_1D],
+                dtype=np.int8
+            )
+            if len(dealt) > 0:
+                # Pad to 5 cards for evaluation
+                if len(dealt) < 5:
+                    board_1d = set()
+                    for c in dealt:
+                        board_1d.add(int(self._lut.LUT_2DCARD_2_1DCARD[c[0], c[1]]))
+                    padded = np.empty((5, 2), dtype=np.int8)
+                    padded[:len(dealt)] = dealt
+                    pad_idx = len(dealt)
+                    for pc in range(52):
+                        if pc not in board_1d:
+                            padded[pad_idx] = card_2d_lut[pc]
+                            board_1d.add(pc)
+                            pad_idx += 1
+                            if pad_idx >= 5:
+                                break
+                    dealt = np.ascontiguousarray(padded)
+                boards_5.append(dealt)
+
+        # Evaluate a sample of hands to get rank distribution
+        sample_size = min(5000, len(valid_indices))
+        sample_idx = np.random.choice(valid_indices, size=sample_size, replace=False)
+        ranks = []
+        for ridx in sample_idx:
+            hand_2d = np.ascontiguousarray(
+                np.array([card_2d_lut[c] for c in hole_cards[ridx]], dtype=np.int8)
+            )
+            avg_rank = 0.0
+            for board in boards_5:
+                avg_rank += self._hand_eval.get_hand_rank_52_plo(hand_2d, board)
+            avg_rank /= len(boards_5)
+            ranks.append(avg_rank)
+
+        ranks = np.array(ranks)
+        # Compute internal percentile boundaries (n_buckets - 1 boundaries)
+        percentiles = np.linspace(0, 100, self._n_buckets + 1)[1:-1]
+        boundaries = np.percentile(ranks, percentiles)
+        return boundaries
