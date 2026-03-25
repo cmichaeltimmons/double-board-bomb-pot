@@ -19,14 +19,26 @@ class CardAbstraction:
              then assigns percentile-based buckets.
     Postflop: computes hand strength against random opponent for a given board,
               then assigns percentile-based buckets. On river, equity is exact.
+
+    For dual-board games (DBBP), uses 2D bucketing: each board gets its own
+    bucket, and the final bucket = board1_bucket * n_per_board + board2_bucket.
+    This preserves per-board strength information that averaging destroys.
     """
 
-    def __init__(self, rules, lut_holder, n_buckets, n_rollouts=5000, cache_dir='./abstraction_cache'):
+    def __init__(self, rules, lut_holder, n_buckets, n_rollouts=5000,
+                 cache_dir='./abstraction_cache', n_buckets_per_board=None):
         self._rules = rules
         self._lut = lut_holder
         self._n_buckets = n_buckets
         self._n_rollouts = n_rollouts
         self._cache_dir = cache_dir
+
+        # For DBBP 2D bucketing: n_buckets_per_board^2 = total buckets
+        # If not specified, infer from n_buckets (e.g. 225 -> 15 per board)
+        if n_buckets_per_board is not None:
+            self._n_buckets_per_board = n_buckets_per_board
+        else:
+            self._n_buckets_per_board = int(np.sqrt(n_buckets))
 
         self._hand_eval = self._get_hand_evaluator()
 
@@ -212,7 +224,11 @@ class CardAbstraction:
         """
         Compute equity for all non-blocked hands, then bucket.
         Handles both single-board and dual-board (DBBP) games.
-        For dual boards, equity is averaged across both boards.
+
+        For dual boards, uses 2D bucketing: each board gets independent buckets,
+        then combined as board1_bucket * n_per_board + board2_bucket.
+        This preserves per-board strength (e.g. nuts on board 1 + air on board 2
+        is distinct from marginal on both).
         """
         boards = self._split_boards(board_2d)
         n_boards = len(boards)
@@ -234,19 +250,33 @@ class CardAbstraction:
             if c[0] != Poker.CARD_NOT_DEALT_TOKEN_1D:
                 all_board_cards_1d.add(int(self._lut.LUT_2DCARD_2_1DCARD[c[0], c[1]]))
 
-        # Compute equity per board, then average
-        hand_equity = np.zeros(self._rules.RANGE_SIZE, dtype=np.float32)
+        # Compute equity per board separately
+        per_board_equity = []
         for bi, board in enumerate(boards):
             if len(board) == 5:
                 eq = self._compute_river_equity_single(valid_indices, board, all_board_cards_1d)
             else:
                 eq = self._compute_mc_equity_single(valid_indices, board, all_board_cards_1d,
                                                      card_2d_lut, hole_cards)
-            hand_equity += eq
+            per_board_equity.append(eq)
 
-        hand_equity /= n_boards
+        if n_boards == 1:
+            # Single board: standard 1D bucketing
+            buckets = self._percentile_bucket(per_board_equity[0], valid_mask)
+        else:
+            # Dual board: 2D bucketing
+            npb = self._n_buckets_per_board
+            print("  2D bucketing: {} per board, {} total".format(npb, npb * npb))
 
-        buckets = self._percentile_bucket(hand_equity, valid_mask)
+            b1 = self._percentile_bucket_n(per_board_equity[0], valid_mask, npb)
+            b2 = self._percentile_bucket_n(per_board_equity[1], valid_mask, npb)
+
+            # Combine: bucket = b1 * npb + b2
+            buckets = np.full(self._rules.RANGE_SIZE, -1, dtype=np.int16)
+            for idx in valid_indices:
+                if b1[idx] >= 0 and b2[idx] >= 0:
+                    buckets[idx] = b1[idx] * npb + b2[idx]
+
         print("  Postflop bucketing complete.")
         return buckets
 
@@ -381,6 +411,13 @@ class CardAbstraction:
         Assign hands to n_buckets equally-spaced percentile bins based on equity.
         Invalid hands get bucket -1.
         """
+        return self._percentile_bucket_n(equity, valid_mask, self._n_buckets)
+
+    def _percentile_bucket_n(self, equity, valid_mask, n):
+        """
+        Assign hands to n equally-spaced percentile bins based on equity.
+        Invalid hands get bucket -1.
+        """
         buckets = np.full(self._rules.RANGE_SIZE, -1, dtype=np.int16)
         valid_indices = np.where(valid_mask)[0]
 
@@ -390,13 +427,12 @@ class CardAbstraction:
         valid_equities = equity[valid_indices]
 
         # Compute percentile boundaries
-        percentiles = np.linspace(0, 100, self._n_buckets + 1)
+        percentiles = np.linspace(0, 100, n + 1)
         boundaries = np.percentile(valid_equities, percentiles)
 
         # Assign buckets via digitize
-        # boundaries[1:-1] gives the internal bin edges
         bucket_ids = np.digitize(valid_equities, boundaries[1:-1])
-        bucket_ids = np.clip(bucket_ids, 0, self._n_buckets - 1)
+        bucket_ids = np.clip(bucket_ids, 0, n - 1)
 
         buckets[valid_indices] = bucket_ids.astype(np.int16)
         return buckets

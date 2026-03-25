@@ -3,8 +3,8 @@ Tabular CFR with card abstraction for PLO / DoubleBoardBombPot.
 No neural networks — uses equity bucketing + lookup tables.
 
 Usage:
-    # External Sampling MCCFR (default, works for DBBP):
-    python examples/run_tabular_cfr.py --game dbbp --n-buckets 50 --n-iterations 10000 --variant plus
+    # External Sampling MCCFR with 2D bucketing (default, works for DBBP):
+    python examples/run_tabular_cfr.py --game dbbp --n-buckets 225 --n-iterations 10000 --variant plus
 
     # Tree-based CFR (only feasible for small games):
     python examples/run_tabular_cfr.py --algo tree-cfr --game plo --n-buckets 100 --n-iterations 500
@@ -27,8 +27,10 @@ def main():
                         help='Algorithm: es-mccfr (external sampling, default) or tree-cfr (full tree)')
     parser.add_argument('--game', choices=['plo', 'dbbp'], default='dbbp',
                         help='Game type: plo (PLO) or dbbp (Double Board Bomb Pot PLO)')
-    parser.add_argument('--n-buckets', type=int, default=50,
-                        help='Number of equity buckets (default: 50)')
+    parser.add_argument('--n-buckets', type=int, default=225,
+                        help='Total number of buckets (default: 225 = 15x15 for DBBP 2D)')
+    parser.add_argument('--n-buckets-per-board', type=int, default=None,
+                        help='Buckets per board for DBBP 2D bucketing (default: sqrt(n-buckets))')
     parser.add_argument('--n-iterations', type=int, default=10000,
                         help='Number of CFR iterations (default: 10000)')
     parser.add_argument('--variant', choices=['vanilla', 'plus', 'linear'], default='plus',
@@ -86,6 +88,7 @@ def _run_es_mccfr(args, game_cls, game_name):
         starting_stack_sizes=[args.stack_size, args.stack_size],
         n_rollouts=args.rollouts,
         cache_dir=args.cache_dir,
+        n_buckets_per_board=args.n_buckets_per_board,
     )
 
     start_iter = 0

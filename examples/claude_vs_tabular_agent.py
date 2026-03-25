@@ -270,14 +270,22 @@ class ESMCCFRAgent:
     Plays using a saved ES-MCCFR strategy.
     Tracks (round, action_history) to look up info sets.
     Uses flop equity buckets + rank-based turn/river bucketing.
+    Supports 2D bucketing for DBBP (separate bucket per board).
     """
 
     def __init__(self, strategy_path, n_buckets=50, n_rollouts=10,
-                 cache_dir='./abstraction_cache', bet_set=None):
+                 cache_dir='./abstraction_cache', bet_set=None,
+                 n_buckets_per_board=None):
         print("Building ES-MCCFR agent...")
 
         self._n_buckets = n_buckets
         game_cls = DoubleBoardBombPotPLO
+        self._is_dbbp = getattr(game_cls, 'N_BOARDS', 1) > 1
+
+        if n_buckets_per_board is not None:
+            self._n_buckets_per_board = n_buckets_per_board
+        else:
+            self._n_buckets_per_board = int(np.sqrt(n_buckets)) if self._is_dbbp else n_buckets
 
         if bet_set is None:
             bet_set = bet_sets.PL_2
@@ -300,6 +308,7 @@ class ESMCCFRAgent:
             n_buckets=n_buckets,
             n_rollouts=n_rollouts,
             cache_dir=cache_dir,
+            n_buckets_per_board=self._n_buckets_per_board if self._is_dbbp else None,
         )
 
         # Precompute flop buckets
@@ -311,7 +320,11 @@ class ESMCCFRAgent:
 
         # Precompute rank boundaries for turn/river bucketing
         print("  Computing rank boundaries...")
-        self._rank_boundaries = self._compute_rank_boundaries(flop_board)
+        if self._is_dbbp:
+            self._rank_boundaries_b1, self._rank_boundaries_b2 = \
+                self._compute_rank_boundaries_2d(flop_board)
+        else:
+            self._rank_boundaries = self._compute_rank_boundaries(flop_board)
 
         # Load strategy — supports both strategy files and checkpoint files
         print("  Loading strategy from {}...".format(strategy_path))
@@ -385,12 +398,22 @@ class ESMCCFRAgent:
             b = int(self._flop_buckets[range_idx])
             return max(b, 0)
 
-        # Turn/River: rank-based bucketing
-        rank = self._eval_hand_on_boards(range_idx, board)
-        b = int(np.searchsorted(self._rank_boundaries, rank))
-        return min(b, self._n_buckets - 1)
+        if self._is_dbbp:
+            # 2D bucketing: separate bucket per board
+            ranks = self._eval_hand_per_board(range_idx, board)
+            npb = self._n_buckets_per_board
+            b1 = int(np.searchsorted(self._rank_boundaries_b1, ranks[0]))
+            b1 = min(b1, npb - 1)
+            b2 = int(np.searchsorted(self._rank_boundaries_b2, ranks[1]))
+            b2 = min(b2, npb - 1)
+            return b1 * npb + b2
+        else:
+            rank = self._eval_hand_on_boards(range_idx, board)
+            b = int(np.searchsorted(self._rank_boundaries, rank))
+            return min(b, self._n_buckets - 1)
 
-    def _eval_hand_on_boards(self, range_idx, board):
+    def _eval_hand_per_board(self, range_idx, board):
+        """Evaluate hand rank on each board separately. Returns list of ranks."""
         hole_cards = self._lut.LUT_IDX_2_HOLE_CARDS[range_idx]
         card_2d_lut = self._lut.LUT_1DCARD_2_2DCARD
         hand_2d = np.ascontiguousarray(
@@ -403,6 +426,7 @@ class ESMCCFRAgent:
             board_slice = board[start:end]
             dealt = [c for c in board_slice if c[0] != Poker.CARD_NOT_DEALT_TOKEN_1D]
             if len(dealt) < 3:
+                ranks.append(0)
                 continue
             board_5 = np.empty((5, 2), dtype=np.int8)
             for i, c in enumerate(dealt):
@@ -423,6 +447,11 @@ class ESMCCFRAgent:
             board_5 = np.ascontiguousarray(board_5)
             rank = hand_evaluator.get_hand_rank_52_plo(hand_2d, board_5)
             ranks.append(rank)
+        return ranks
+
+    def _eval_hand_on_boards(self, range_idx, board):
+        """Average rank across all boards (legacy 1D bucketing)."""
+        ranks = self._eval_hand_per_board(range_idx, board)
         if not ranks:
             return 0
         return sum(ranks) / len(ranks)
@@ -476,16 +505,73 @@ class ESMCCFRAgent:
         percentiles = np.linspace(0, 100, self._n_buckets + 1)[1:-1]
         return np.percentile(ranks, percentiles)
 
+    def _compute_rank_boundaries_2d(self, flop_board):
+        """Compute separate rank boundaries per board for 2D bucketing."""
+        valid_mask = self._card_abs.get_blocked_mask(flop_board)
+        valid_indices = np.where(valid_mask)[0]
+        hole_cards = self._lut.LUT_IDX_2_HOLE_CARDS
+        card_2d_lut = self._lut.LUT_1DCARD_2_2DCARD
+
+        boards_5 = []
+        total_slots = len(flop_board)
+        for start in range(0, total_slots, 5):
+            end = min(start + 5, total_slots)
+            dealt = np.array(
+                [c for c in flop_board[start:end] if c[0] != Poker.CARD_NOT_DEALT_TOKEN_1D],
+                dtype=np.int8
+            )
+            if len(dealt) > 0:
+                if len(dealt) < 5:
+                    board_1d = set()
+                    for c in dealt:
+                        board_1d.add(int(self._lut.LUT_2DCARD_2_1DCARD[c[0], c[1]]))
+                    padded = np.empty((5, 2), dtype=np.int8)
+                    padded[:len(dealt)] = dealt
+                    pad_idx = len(dealt)
+                    for pc in range(52):
+                        if pc not in board_1d:
+                            padded[pad_idx] = card_2d_lut[pc]
+                            board_1d.add(pc)
+                            pad_idx += 1
+                            if pad_idx >= 5:
+                                break
+                    dealt = np.ascontiguousarray(padded)
+                boards_5.append(dealt)
+
+        sample_size = min(5000, len(valid_indices))
+        sample_idx = np.random.choice(valid_indices, size=sample_size, replace=False)
+
+        ranks_per_board = [[] for _ in boards_5]
+        for ridx in sample_idx:
+            hand_2d = np.ascontiguousarray(
+                np.array([card_2d_lut[c] for c in hole_cards[ridx]], dtype=np.int8)
+            )
+            for bi, board in enumerate(boards_5):
+                rank = hand_evaluator.get_hand_rank_52_plo(hand_2d, board)
+                ranks_per_board[bi].append(rank)
+
+        npb = self._n_buckets_per_board
+        percentiles = np.linspace(0, 100, npb + 1)[1:-1]
+        boundaries = []
+        for bi in range(len(boards_5)):
+            r = np.array(ranks_per_board[bi])
+            boundaries.append(np.percentile(r, percentiles))
+
+        if len(boundaries) >= 2:
+            return boundaries[0], boundaries[1]
+        return boundaries[0], boundaries[0]
+
 
 def play_match(strategy_path, n_hands=100000, report_interval=1000,
                n_buckets=200, algo='es-mccfr', cache_dir='./abstraction_cache',
-               n_rollouts=10):
+               n_rollouts=10, n_buckets_per_board=None):
 
     use_es_mccfr = (algo == 'es-mccfr')
 
     if use_es_mccfr:
         agent = ESMCCFRAgent(strategy_path, n_buckets=n_buckets,
-                             n_rollouts=n_rollouts, cache_dir=cache_dir)
+                             n_rollouts=n_rollouts, cache_dir=cache_dir,
+                             n_buckets_per_board=n_buckets_per_board)
         bet_set = bet_sets.PL_2
     else:
         agent = TabularCFRAgent(strategy_path, n_buckets=n_buckets, cache_dir=cache_dir)
@@ -615,8 +701,10 @@ if __name__ == '__main__':
                         help='Number of hands (default: 100000)')
     parser.add_argument('--interval', type=int, default=1000,
                         help='Report every N hands (default: 1000)')
-    parser.add_argument('--n-buckets', type=int, default=50,
-                        help='Number of buckets (must match training, default: 50)')
+    parser.add_argument('--n-buckets', type=int, default=225,
+                        help='Number of buckets (must match training, default: 225)')
+    parser.add_argument('--n-buckets-per-board', type=int, default=None,
+                        help='Buckets per board for 2D bucketing (default: sqrt(n-buckets))')
     parser.add_argument('--rollouts', type=int, default=10,
                         help='MC rollouts for bucketing (must match training, default: 10)')
     parser.add_argument('--cache-dir', type=str, default='./abstraction_cache',
@@ -631,4 +719,5 @@ if __name__ == '__main__':
         algo=args.algo,
         cache_dir=args.cache_dir,
         n_rollouts=args.rollouts,
+        n_buckets_per_board=args.n_buckets_per_board,
     )
