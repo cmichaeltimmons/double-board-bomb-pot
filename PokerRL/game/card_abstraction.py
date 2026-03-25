@@ -32,9 +32,8 @@ def _eval_chunk_exhaustive(args):
     full_board[:n_dealt] = partial_board
 
     for i, ridx in enumerate(chunk_indices):
-        if i % 5000 == 0:
-            print("    Core {}/{}: hand {}/{}...".format(
-                chunk_id + 1, n_chunks, i, len(chunk_indices)))
+        if chunk_id == 0 and i % 100 == 0:
+            print("    Progress: hand {}/{} (core 1)...".format(i, len(chunk_indices)))
             sys.stdout.flush()
 
         my_cards_1d = set(hole_cards[ridx].tolist())
@@ -415,7 +414,7 @@ class CardAbstraction:
         board_completions = list(itertools.combinations(deck_cards, n_remaining))
         n_completions = len(board_completions)
 
-        n_workers = min(cpu_count(), 16)
+        n_workers = cpu_count()
         print("    Exhaustive equity: {} board completions, {} hands, {} workers...".format(
             n_completions, len(valid_indices), n_workers))
         sys.stdout.flush()
