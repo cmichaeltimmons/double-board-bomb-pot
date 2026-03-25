@@ -11,6 +11,53 @@ from collections import defaultdict
 from PokerRL.game.Poker import Poker
 
 
+def _eval_chunk_exhaustive(args):
+    """
+    Worker function for parallel exhaustive equity computation.
+    Must be at module level for multiprocessing to pickle it.
+    """
+    (chunk_indices, partial_board, board_completions, n_dealt,
+     hole_cards, card_2d_lut, chunk_id, n_chunks) = args
+
+    import sys
+    try:
+        from PokerRL.game._.cpp_wrappers.CppHandeval import CppHandeval
+        hand_eval = CppHandeval()
+    except Exception:
+        from PokerRL.game._.cpp_wrappers.PythonHandeval import PythonHandeval
+        hand_eval = PythonHandeval()
+
+    equities = []
+    full_board = np.empty((5, 2), dtype=np.int8)
+    full_board[:n_dealt] = partial_board
+
+    for i, ridx in enumerate(chunk_indices):
+        if i % 5000 == 0:
+            print("    Core {}/{}: hand {}/{}...".format(
+                chunk_id + 1, n_chunks, i, len(chunk_indices)))
+            sys.stdout.flush()
+
+        my_cards_1d = set(hole_cards[ridx].tolist())
+        my_hand_2d = np.ascontiguousarray(
+            np.array([card_2d_lut[c] for c in hole_cards[ridx]], dtype=np.int8)
+        )
+
+        rank_sum = 0
+        count = 0
+        for completion in board_completions:
+            if any(c in my_cards_1d for c in completion):
+                continue
+            for j, c in enumerate(completion):
+                full_board[n_dealt + j] = card_2d_lut[c]
+            full_board_c = np.ascontiguousarray(full_board)
+            rank_sum += hand_eval.get_hand_rank_52_plo(my_hand_2d, full_board_c)
+            count += 1
+
+        equities.append(rank_sum / count if count > 0 else 0)
+
+    return chunk_indices, equities
+
+
 class CardAbstraction:
     """
     Maps range_idx -> bucket_id based on hand equity.
@@ -355,56 +402,47 @@ class CardAbstraction:
         Exhaustive equity for an incomplete board (flop or turn).
         Enumerates all possible remaining board cards (~870 combos on flop,
         ~30 on turn) and averages hand rank across all completions.
-        Exact, deterministic, and fast enough since this is precomputed once.
+        Parallelized across all available CPU cores.
         """
         import sys
         import itertools
+        from multiprocessing import Pool, cpu_count
 
         n_dealt = len(partial_board)
         n_remaining = 5 - n_dealt
 
-        # Cards available for board completions (exclude board cards only, not hole cards,
-        # since we want the same board completions for all hands)
         deck_cards = [c for c in range(self._rules.N_CARDS_IN_DECK) if c not in all_board_cards_1d]
-
-        # Generate all possible board completions
         board_completions = list(itertools.combinations(deck_cards, n_remaining))
         n_completions = len(board_completions)
-        print("    Exhaustive equity: {} board completions, {} hands...".format(
-            n_completions, len(valid_indices)))
+
+        n_workers = cpu_count()
+        print("    Exhaustive equity: {} board completions, {} hands, {} CPU cores...".format(
+            n_completions, len(valid_indices), n_workers))
         sys.stdout.flush()
 
         hand_equity = np.zeros(self._rules.RANGE_SIZE, dtype=np.float32)
 
-        # Pre-allocate board buffer
-        full_board = np.empty((5, 2), dtype=np.int8)
-        full_board[:n_dealt] = partial_board
+        # Split valid_indices into chunks for parallel processing
+        chunk_size = max(1, len(valid_indices) // n_workers)
+        chunks = []
+        for start in range(0, len(valid_indices), chunk_size):
+            end = min(start + chunk_size, len(valid_indices))
+            chunks.append(valid_indices[start:end])
 
-        for i, ridx in enumerate(valid_indices):
-            if i % 5000 == 0:
-                print("    Hand {}/{}...".format(i, len(valid_indices)))
-                sys.stdout.flush()
+        # Prepare shared data for worker processes
+        worker_args = [
+            (chunk, partial_board, board_completions, n_dealt,
+             hole_cards, card_2d_lut, ci, len(chunks))
+            for ci, chunk in enumerate(chunks)
+        ]
 
-            my_cards_1d = set(hole_cards[ridx].tolist())
-            my_hand_2d = np.ascontiguousarray(
-                np.array([card_2d_lut[c] for c in hole_cards[ridx]], dtype=np.int8)
-            )
+        with Pool(n_workers) as pool:
+            results = pool.map(_eval_chunk_exhaustive, worker_args)
 
-            rank_sum = 0
-            count = 0
-            for completion in board_completions:
-                # Skip if completion overlaps with hole cards
-                if any(c in my_cards_1d for c in completion):
-                    continue
-
-                for j, c in enumerate(completion):
-                    full_board[n_dealt + j] = card_2d_lut[c]
-
-                full_board_c = np.ascontiguousarray(full_board)
-                rank_sum += self._hand_eval.get_hand_rank_52_plo(my_hand_2d, full_board_c)
-                count += 1
-
-            hand_equity[ridx] = rank_sum / count if count > 0 else 0
+        # Merge results
+        for chunk_indices, chunk_equities in results:
+            for ridx, eq in zip(chunk_indices, chunk_equities):
+                hand_equity[ridx] = eq
 
         return hand_equity
 
