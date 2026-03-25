@@ -329,7 +329,8 @@ class ExternalSamplingMCCFR:
         """
         Per-street bucketing:
         - Flop: precomputed equity buckets (MC rollouts, cached)
-        - Turn/River: instant rank-based buckets using current board
+        - Turn: exhaustive river runout equity (exact, ~30 cards to try)
+        - River: exact hand rank (no more cards)
         For DBBP, uses 2D bucketing on turn/river.
         """
         if current_round == Poker.FLOP:
@@ -339,16 +340,23 @@ class ExternalSamplingMCCFR:
         board_2d = self._env.board
 
         if self._is_dbbp:
-            # 2D bucketing: separate bucket per board
-            ranks = self._eval_hand_per_board(range_idx, board_2d)
+            if current_round == Poker.TURN:
+                # Exact equity: run out all possible river cards
+                eqs = self._eval_equity_per_board_exhaustive(range_idx, board_2d)
+            else:
+                # River: rank = equity (no more cards)
+                eqs = self._eval_hand_per_board(range_idx, board_2d)
             npb = self._n_buckets_per_board
-            b1 = int(np.searchsorted(self._rank_boundaries_b1, ranks[0]))
+            b1 = int(np.searchsorted(self._rank_boundaries_b1, eqs[0]))
             b1 = min(b1, npb - 1)
-            b2 = int(np.searchsorted(self._rank_boundaries_b2, ranks[1]))
+            b2 = int(np.searchsorted(self._rank_boundaries_b2, eqs[1]))
             b2 = min(b2, npb - 1)
             return b1 * npb + b2
         else:
-            rank = self._eval_hand_on_boards(range_idx, board_2d)
+            if current_round == Poker.TURN:
+                rank = self._eval_equity_avg_exhaustive(range_idx, board_2d)
+            else:
+                rank = self._eval_hand_on_boards(range_idx, board_2d)
             b = int(np.searchsorted(self._rank_boundaries, rank))
             return min(b, self._n_buckets - 1)
 
@@ -392,6 +400,70 @@ class ExternalSamplingMCCFR:
             ranks.append(rank)
 
         return ranks
+
+    def _eval_equity_per_board_exhaustive(self, range_idx, board_2d):
+        """
+        On the turn, run out every possible river card and compute average
+        hand rank per board. ~30 unknown cards = ~30 evaluations per board.
+        Returns list of avg ranks (one per board).
+        """
+        hole_cards = self._lut.LUT_IDX_2_HOLE_CARDS[range_idx]
+        card_2d_lut = self._lut.LUT_1DCARD_2_2DCARD
+        hand_2d = np.ascontiguousarray(
+            np.array([card_2d_lut[c] for c in hole_cards], dtype=np.int8)
+        )
+
+        # Collect all known cards (hole + dealt board)
+        known_1d = set(hole_cards.tolist())
+        for c in board_2d:
+            if c[0] != Poker.CARD_NOT_DEALT_TOKEN_1D:
+                known_1d.add(int(self._lut.LUT_2DCARD_2_1DCARD[c[0], c[1]]))
+        remaining = [c for c in range(52) if c not in known_1d]
+
+        # Split boards and find which ones need a river card
+        total_slots = len(board_2d)
+        board_infos = []  # (dealt_cards, n_dealt, slot_in_board_2d)
+        for start in range(0, total_slots, 5):
+            end = min(start + 5, total_slots)
+            dealt = [c for c in board_2d[start:end] if c[0] != Poker.CARD_NOT_DEALT_TOKEN_1D]
+            board_infos.append((dealt, len(dealt), start))
+
+        avg_ranks = []
+        for dealt, n_dealt, start in board_infos:
+            if n_dealt < 3:
+                avg_ranks.append(0)
+                continue
+            if n_dealt == 5:
+                # Complete board — just evaluate once
+                board_5 = np.ascontiguousarray(
+                    np.array(dealt, dtype=np.int8)
+                )
+                avg_ranks.append(self._hand_eval.get_hand_rank_52_plo(hand_2d, board_5))
+                continue
+
+            # n_dealt == 4 (turn): run out all possible river cards
+            board_5 = np.empty((5, 2), dtype=np.int8)
+            for i, c in enumerate(dealt):
+                board_5[i] = c
+
+            rank_sum = 0
+            count = 0
+            for rc in remaining:
+                board_5[4] = card_2d_lut[rc]
+                board_5_c = np.ascontiguousarray(board_5)
+                rank_sum += self._hand_eval.get_hand_rank_52_plo(hand_2d, board_5_c)
+                count += 1
+
+            avg_ranks.append(rank_sum / count if count > 0 else 0)
+
+        return avg_ranks
+
+    def _eval_equity_avg_exhaustive(self, range_idx, board_2d):
+        """Average exhaustive equity across all boards (single-board fallback)."""
+        eqs = self._eval_equity_per_board_exhaustive(range_idx, board_2d)
+        if not eqs:
+            return 0
+        return sum(eqs) / len(eqs)
 
     def _eval_hand_on_boards(self, range_idx, board_2d):
         """Evaluate a single hand's average rank across all boards (DBBP has 2)."""
