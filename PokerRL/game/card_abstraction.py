@@ -415,8 +415,8 @@ class CardAbstraction:
         board_completions = list(itertools.combinations(deck_cards, n_remaining))
         n_completions = len(board_completions)
 
-        n_workers = cpu_count()
-        print("    Exhaustive equity: {} board completions, {} hands, {} CPU cores...".format(
+        n_workers = min(cpu_count(), 16)
+        print("    Exhaustive equity: {} board completions, {} hands, {} workers...".format(
             n_completions, len(valid_indices), n_workers))
         sys.stdout.flush()
 
