@@ -256,8 +256,8 @@ class CardAbstraction:
             if len(board) == 5:
                 eq = self._compute_river_equity_single(valid_indices, board, all_board_cards_1d)
             else:
-                eq = self._compute_mc_equity_single(valid_indices, board, all_board_cards_1d,
-                                                     card_2d_lut, hole_cards)
+                eq = self._compute_exhaustive_equity_single(
+                    valid_indices, board, all_board_cards_1d, card_2d_lut, hole_cards)
             per_board_equity.append(eq)
 
         if n_boards == 1:
@@ -349,56 +349,62 @@ class CardAbstraction:
 
         return hand_equity
 
-    def _compute_mc_equity_single(self, valid_indices, partial_board, all_board_cards_1d,
-                                   card_2d_lut, hole_cards):
-        """Monte Carlo equity for a single incomplete board (flop or turn)."""
+    def _compute_exhaustive_equity_single(self, valid_indices, partial_board,
+                                           all_board_cards_1d, card_2d_lut, hole_cards):
+        """
+        Exhaustive equity for an incomplete board (flop or turn).
+        Enumerates all possible remaining board cards (~870 combos on flop,
+        ~30 on turn) and averages hand rank across all completions.
+        Exact, deterministic, and fast enough since this is precomputed once.
+        """
         import sys
-        n_remaining = 5 - len(partial_board)
-        deck_cards = list(range(self._rules.N_CARDS_IN_DECK))
+        import itertools
+
+        n_dealt = len(partial_board)
+        n_remaining = 5 - n_dealt
+
+        # Cards available for board completions (exclude board cards only, not hole cards,
+        # since we want the same board completions for all hands)
+        deck_cards = [c for c in range(self._rules.N_CARDS_IN_DECK) if c not in all_board_cards_1d]
+
+        # Generate all possible board completions
+        board_completions = list(itertools.combinations(deck_cards, n_remaining))
+        n_completions = len(board_completions)
+        print("    Exhaustive equity: {} board completions, {} hands...".format(
+            n_completions, len(valid_indices)))
+        sys.stdout.flush()
 
         hand_equity = np.zeros(self._rules.RANGE_SIZE, dtype=np.float32)
 
-        # Pre-allocate contiguous buffers for C++ evaluator compatibility
-        full_board_2d = np.empty((5, 2), dtype=np.int8)
-        full_board_2d[:len(partial_board)] = partial_board
-        opp_2d = np.empty((self._rules.N_HOLE_CARDS, 2), dtype=np.int8)
+        # Pre-allocate board buffer
+        full_board = np.empty((5, 2), dtype=np.int8)
+        full_board[:n_dealt] = partial_board
 
         for i, ridx in enumerate(valid_indices):
-            if i % 1000 == 0:
-                print("    MC equity: hand {}/{}...".format(i, len(valid_indices)))
+            if i % 5000 == 0:
+                print("    Hand {}/{}...".format(i, len(valid_indices)))
                 sys.stdout.flush()
 
             my_cards_1d = set(hole_cards[ridx].tolist())
             my_hand_2d = np.ascontiguousarray(
                 np.array([card_2d_lut[c] for c in hole_cards[ridx]], dtype=np.int8)
             )
-            remaining = [c for c in deck_cards if c not in my_cards_1d and c not in all_board_cards_1d]
 
-            wins = 0.0
-            total = 0
-            for _ in range(self._n_rollouts):
-                drawn = np.random.choice(remaining,
-                                         size=self._rules.N_HOLE_CARDS + n_remaining,
-                                         replace=False)
-                opp_1d = drawn[:self._rules.N_HOLE_CARDS]
-                extra_board_1d = drawn[self._rules.N_HOLE_CARDS:]
+            rank_sum = 0
+            count = 0
+            for completion in board_completions:
+                # Skip if completion overlaps with hole cards
+                if any(c in my_cards_1d for c in completion):
+                    continue
 
-                # Fill pre-allocated buffers (avoids np.concatenate stride issues)
-                for j, c in enumerate(extra_board_1d):
-                    full_board_2d[len(partial_board) + j] = card_2d_lut[c]
-                for j, c in enumerate(opp_1d):
-                    opp_2d[j] = card_2d_lut[c]
+                for j, c in enumerate(completion):
+                    full_board[n_dealt + j] = card_2d_lut[c]
 
-                rank_us = self._hand_eval.get_hand_rank_52_plo(my_hand_2d, full_board_2d)
-                rank_opp = self._hand_eval.get_hand_rank_52_plo(opp_2d, full_board_2d)
+                full_board_c = np.ascontiguousarray(full_board)
+                rank_sum += self._hand_eval.get_hand_rank_52_plo(my_hand_2d, full_board_c)
+                count += 1
 
-                if rank_us > rank_opp:
-                    wins += 1.0
-                elif rank_us == rank_opp:
-                    wins += 0.5
-                total += 1
-
-            hand_equity[ridx] = wins / total if total > 0 else 0.5
+            hand_equity[ridx] = rank_sum / count if count > 0 else 0
 
         return hand_equity
 
